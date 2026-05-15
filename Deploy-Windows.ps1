@@ -2278,10 +2278,35 @@ function Get-ProjectsForSelection([string]$Scope, [string]$TokenStorePath = "") 
   return (Get-ProjectsFromVercel -Scope $Scope -TokenStorePath $TokenStorePath)
 }
 
+function Normalize-ProjectList($Projects) {
+  if ($null -eq $Projects) { return @() }
+  return @($Projects | Where-Object {
+    $null -ne $_ -and
+    $_.PSObject.Properties.Name -contains "Name" -and
+    -not [string]::IsNullOrWhiteSpace([string]$_.Name)
+  })
+}
+
+function Get-NormalizedProjectsForSelection([string]$Scope, [string]$TokenStorePath = "") {
+  return @(Normalize-ProjectList (Get-ProjectsForSelection -Scope $Scope -TokenStorePath $TokenStorePath))
+}
+
+function Write-ProjectList([object[]]$Projects, [string]$Prefix = "") {
+  Write-Host ""
+  Write-Host "Projects:" -ForegroundColor Cyan
+  for ($i = 0; $i -lt $Projects.Count; $i++) {
+    $scopeText = ""
+    if ($Projects[$i].PSObject.Properties.Name -contains "Scope" -and -not [string]::IsNullOrWhiteSpace([string]$Projects[$i].Scope)) {
+      $scopeText = "  (scope: $([string]$Projects[$i].Scope))"
+    }
+    Write-Host ("[{0}] {1}{2}{3}" -f ($i + 1), $Prefix, $Projects[$i].Name, $scopeText)
+  }
+}
+
 function Select-ProjectFromList([string]$Scope, [string]$TokenStorePath = "") {
   Write-Step "Loading projects from Vercel..."
   try {
-    $projects = Get-ProjectsForSelection -Scope $Scope -TokenStorePath $TokenStorePath
+    $projects = @(Get-NormalizedProjectsForSelection -Scope $Scope -TokenStorePath $TokenStorePath)
   } catch {
     Write-Host "Could not load project list: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "Tip: continue with option 5 (Deploy as NEW project), or retry with token auth." -ForegroundColor DarkYellow
@@ -2292,19 +2317,12 @@ function Select-ProjectFromList([string]$Scope, [string]$TokenStorePath = "") {
     return $null
   }
 
-  Write-Host ""
-  Write-Host "Projects:" -ForegroundColor Cyan
-  for ($i = 0; $i -lt $projects.Count; $i++) {
-    $scopeText = ""
-    if ($projects[$i].PSObject.Properties.Name -contains "Scope" -and -not [string]::IsNullOrWhiteSpace([string]$projects[$i].Scope)) {
-      $scopeText = "  (scope: $([string]$projects[$i].Scope))"
-    }
-    Write-Host ("[{0}] {1}{2}" -f ($i + 1), $projects[$i].Name, $scopeText)
-  }
+  Write-ProjectList -Projects $projects
   Write-Host "[0] Cancel"
 
+  $defaultPick = if ($projects.Count -gt 0) { "1" } else { "0" }
   while ($true) {
-    $choiceRaw = Read-Default "Select project number" "0"
+    $choiceRaw = Read-Default "Select project number" $defaultPick
     $n = 0
     if (-not [int]::TryParse($choiceRaw, [ref]$n)) {
       Write-Host "Invalid number." -ForegroundColor Red
@@ -2321,7 +2339,7 @@ function Select-ProjectFromList([string]$Scope, [string]$TokenStorePath = "") {
 function Select-ProjectOrNewForFirstRun([string]$Scope, [string]$TokenStorePath = "") {
   Write-Step "Loading your Vercel projects from token/API..."
   try {
-    $projects = Get-ProjectsForSelection -Scope $Scope -TokenStorePath $TokenStorePath
+    $projects = @(Get-NormalizedProjectsForSelection -Scope $Scope -TokenStorePath $TokenStorePath)
   } catch {
     Write-Host "Could not load projects list. Continuing with NEW-project flow." -ForegroundColor DarkYellow
     Write-Host "Details: $($_.Exception.Message)" -ForegroundColor DarkGray
@@ -2331,13 +2349,7 @@ function Select-ProjectOrNewForFirstRun([string]$Scope, [string]$TokenStorePath 
   Write-Host ""
   Write-Host "Choose a target to continue:" -ForegroundColor Cyan
   if ($projects.Count -gt 0) {
-    for ($i = 0; $i -lt $projects.Count; $i++) {
-      $scopeText = ""
-      if ($projects[$i].PSObject.Properties.Name -contains "Scope" -and -not [string]::IsNullOrWhiteSpace([string]$projects[$i].Scope)) {
-        $scopeText = "  (scope: $([string]$projects[$i].Scope))"
-      }
-      Write-Host ("[{0}] Use existing project: {1}{2}" -f ($i + 1), $projects[$i].Name, $scopeText)
-    }
+    Write-ProjectList -Projects $projects -Prefix "Use existing project: "
   } else {
     Write-Host "No existing projects found in current scope/account." -ForegroundColor DarkYellow
   }
@@ -2754,7 +2766,7 @@ function Get-ObjectPropertyValue($Obj, [string[]]$Names) {
   if ($null -eq $Obj) { return $null }
   foreach ($name in $Names) {
     if ($Obj.PSObject.Properties.Name -contains $name) {
-      return $Obj.$name
+      return $Obj.PSObject.Properties[$name].Value
     }
   }
   return $null
@@ -2765,7 +2777,12 @@ function Convert-ToDoubleSafe($Value, [double]$Default = 0) {
   try {
     $s = ([string]$Value).Trim()
     if ([string]::IsNullOrWhiteSpace($s)) { return $Default }
-    return [double]::Parse($s, [System.Globalization.CultureInfo]::InvariantCulture)
+    $s = $s -replace ",", ""
+    $match = [regex]::Match($s, '[-+]?\d+(\.\d+)?')
+    if ($match.Success) {
+      return [double]::Parse($match.Value, [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    return $Default
   } catch {
     return $Default
   }
@@ -2880,7 +2897,27 @@ function Get-BillingRowColor([string]$ServiceName, [double]$Quantity, [string]$U
 function Get-FirstNumberFromObject($Obj, [string[]]$Names) {
   foreach ($name in $Names) {
     $value = Get-ObjectPropertyValue -Obj $Obj -Names @($name)
-    if ($null -ne $value) { return (Convert-ToDoubleSafe $value) }
+    if ($null -ne $value) {
+      if ($value -isnot [string] -and $value.PSObject.Properties.Count -gt 0) {
+        $nested = Get-FirstNumberFromObject -Obj $value -Names @("amount", "Amount", "value", "Value", "quantity", "Quantity", "total", "Total", "cost", "Cost")
+        if ($nested -ne 0) { return $nested }
+      }
+      return (Convert-ToDoubleSafe $value)
+    }
+  }
+  return 0.0
+}
+
+function Get-FirstBillingNumber($Obj, [string[]]$Names) {
+  foreach ($name in $Names) {
+    $value = Get-ObjectPropertyValue -Obj $Obj -Names @($name)
+    if ($null -eq $value) { continue }
+    if ($value -isnot [string] -and $value.PSObject.Properties.Count -gt 0) {
+      $nested = Get-FirstNumberFromObject -Obj $value -Names @("amount", "Amount", "value", "Value", "quantity", "Quantity", "total", "Total", "cost", "Cost")
+      if ($nested -ne 0) { return $nested }
+    }
+    $parsed = Convert-ToDoubleSafe -Value $value -Default ([double]::NaN)
+    if (-not [double]::IsNaN($parsed)) { return $parsed }
   }
   return 0.0
 }
@@ -2906,7 +2943,7 @@ function Convert-VercelUsageCliToBillingRows($UsageObj) {
     $service = [string](Get-ObjectPropertyValue -Obj $item -Names @("ServiceName", "serviceName", "Product", "product", "Name", "name", "label", "Label"))
     $usageObj = Get-ObjectPropertyValue -Obj $item -Names @("usage", "Usage", "quantity", "Quantity", "total", "Total")
     $unit = [string](Get-ObjectPropertyValue -Obj $item -Names @("ConsumedUnit", "consumedUnit", "Unit", "unit"))
-    $quantity = Get-FirstNumberFromObject -Obj $item -Names @("ConsumedQuantity", "consumedQuantity", "UsageQuantity", "usageQuantity", "quantity", "Quantity", "amount", "Amount", "value", "Value")
+    $quantity = Get-FirstNumberFromObject -Obj $item -Names @("ConsumedQuantity", "consumedQuantity", "Consumed Quantity", "UsageQuantity", "usageQuantity", "PricingQuantity", "pricingQuantity", "Usage", "usage", "quantity", "Quantity", "amount", "Amount", "value", "Value")
 
     if ($null -ne $usageObj -and -not ($usageObj -is [string])) {
       if ([string]::IsNullOrWhiteSpace($unit)) {
@@ -2919,8 +2956,8 @@ function Convert-VercelUsageCliToBillingRows($UsageObj) {
       $quantity = Convert-ToDoubleSafe $usageObj
     }
 
-    $billedObj = Get-ObjectPropertyValue -Obj $item -Names @("billedCost", "BilledCost", "charge", "Charge", "cost", "Cost")
-    $effectiveObj = Get-ObjectPropertyValue -Obj $item -Names @("effectiveCost", "EffectiveCost", "value", "Value")
+    $billedObj = Get-ObjectPropertyValue -Obj $item -Names @("billedCost", "BilledCost", "Billed Cost", "charge", "Charge", "cost", "Cost", "CostInBillingCurrency", "costInBillingCurrency")
+    $effectiveObj = Get-ObjectPropertyValue -Obj $item -Names @("effectiveCost", "EffectiveCost", "Effective Cost", "value", "Value", "ListCost", "listCost", "ContractedCost", "contractedCost")
     $billed = Convert-ToDoubleSafe $billedObj
     $effective = Convert-ToDoubleSafe $effectiveObj
     if ($billed -eq 0 -and $null -ne $billedObj -and -not ($billedObj -is [string])) {
@@ -3089,10 +3126,10 @@ function Show-BillingUsageMonitor([string]$ProjectName, [string]$Scope, [string]
   foreach ($r in $rows) {
     $service = [string](Get-ObjectPropertyValue -Obj $r -Names @("ServiceName", "serviceName", "Product", "product"))
     $service = Normalize-BillingServiceName -ServiceName $service
-    $unit = [string](Get-ObjectPropertyValue -Obj $r -Names @("ConsumedUnit", "consumedUnit", "Unit", "unit"))
-    $qty = Convert-ToDoubleSafe (Get-ObjectPropertyValue -Obj $r -Names @("ConsumedQuantity", "consumedQuantity", "UsageQuantity", "usageQuantity", "quantity"))
-    $billed = Convert-ToDoubleSafe (Get-ObjectPropertyValue -Obj $r -Names @("BilledCost", "billedCost", "Charge", "charge", "Cost", "cost"))
-    $effective = Convert-ToDoubleSafe (Get-ObjectPropertyValue -Obj $r -Names @("EffectiveCost", "effectiveCost", "PricingQuantity", "pricingQuantity"))
+    $unit = [string](Get-ObjectPropertyValue -Obj $r -Names @("ConsumedUnit", "consumedUnit", "Consumed Unit", "PricingUnit", "pricingUnit", "Unit", "unit"))
+    $qty = Get-FirstBillingNumber -Obj $r -Names @("ConsumedQuantity", "consumedQuantity", "Consumed Quantity", "UsageQuantity", "usageQuantity", "PricingQuantity", "pricingQuantity", "Usage", "usage", "quantity", "Quantity")
+    $billed = Get-FirstBillingNumber -Obj $r -Names @("BilledCost", "billedCost", "Billed Cost", "Charge", "charge", "Cost", "cost", "CostInBillingCurrency", "costInBillingCurrency")
+    $effective = Get-FirstBillingNumber -Obj $r -Names @("EffectiveCost", "effectiveCost", "Effective Cost", "ListCost", "listCost", "ContractedCost", "contractedCost", "PricingQuantity", "pricingQuantity")
     $category = [string](Get-ObjectPropertyValue -Obj $r -Names @("ServiceCategory", "serviceCategory", "ChargeCategory", "chargeCategory"))
     if ([string]::IsNullOrWhiteSpace($service)) { $service = "Unknown" }
     if (-not $groups.ContainsKey($service)) {
@@ -4658,25 +4695,15 @@ function Show-HealthTestMenu($selectedProjectName, $scope) {
   Write-Banner
   Write-CurrentTarget -selectedProjectName $selectedProjectName -scope $scope
   Write-Host "Health Test" -ForegroundColor Cyan
-  Write-Host "[1] Run health + smoke checks"
-  Write-Host "[2] Show readable logs"
-  Write-Host "[3] Run load-test lite"
-  Write-Host "[4] ENV drift detector"
-  Write-Host "[5] Profile benchmark runner"
-  Write-Host "[6] Live readable logs"
-  Write-Host "[7] View deployment ENV config"
-  Write-Host "[8] Billing / Usage monitor"
+  Write-Host "[1] Health test"
+  Write-Host "[2] ENV"
+  Write-Host "[3] Billing"
   Write-Host "[0] Back"
   $choice = Read-Default "Choose action" "1"
   switch ($choice) {
     "1" { return "6" }
-    "2" { return "7" }
-    "3" { return "8" }
-    "4" { return "9" }
-    "5" { return "10" }
-    "6" { return "11" }
-    "7" { return "12" }
-    "8" { return "14" }
+    "2" { return "12" }
+    "3" { return "14" }
     "0" { return "__BACK__" }
     default { return "__INVALID__" }
   }
@@ -4686,13 +4713,13 @@ function Show-ProjectManagementMenu($selectedProjectName, $scope) {
   Write-Banner
   Write-CurrentTarget -selectedProjectName $selectedProjectName -scope $scope
   Write-Host "Project Management" -ForegroundColor Cyan
-  Write-Host "[1] Select project from Vercel list"
+  Write-Host "[1] Select/view project from Vercel list"
   Write-Host "[2] Delete project"
   Write-Host "[0] Back"
   $choice = Read-Default "Choose action" "1"
   switch ($choice) {
-    "1" { return "1" }
-    "2" { return "13" }
+    "1" { return "__SELECT_PROJECT__" }
+    "2" { return "__DELETE_PROJECT__" }
     "0" { return "__BACK__" }
     default { return "__INVALID__" }
   }
@@ -4784,6 +4811,42 @@ function Run-ManagementLoop([string]$InitialScope) {
 
     try {
       switch ($choice) {
+        "__SELECT_PROJECT__" {
+          $selected = Select-ProjectFromList -Scope $scope -TokenStorePath $tokenStorePath
+          if ($null -ne $selected) {
+            $selectedProjectName = $selected.Name
+            if ($selected.PSObject.Properties.Name -contains "Scope" -and -not [string]::IsNullOrWhiteSpace([string]$selected.Scope)) {
+              $scope = Normalize-ScopeForCli -Scope ([string]$selected.Scope)
+            }
+            $selectedRuntime = ""
+            $selectedDeployMode = ""
+            $selectedRelayPath = "/api"
+            $savedState = Load-LocalProjectDeployState -ProjectName $selectedProjectName
+            if ($null -ne $savedState) {
+              $selectedRuntime = [string]$savedState.Runtime
+              $selectedDeployMode = [string]$savedState.DeployMode
+              if (-not [string]::IsNullOrWhiteSpace([string]$savedState.RelayPath)) { $selectedRelayPath = [string]$savedState.RelayPath }
+            }
+            Write-Host "Selected project: $selectedProjectName" -ForegroundColor Green
+            Ensure-LinkedToProject -ProjectName $selectedProjectName -Scope $scope
+          }
+        }
+        "__DELETE_PROJECT__" {
+          $deleteResult = Run-DeleteProjectFlow -Scope $scope -TokenStorePath $tokenStorePath
+          if ($deleteResult.Deleted) {
+            if ([string]$deleteResult.ProjectName -eq $selectedProjectName) {
+              $selectedRuntime = ""
+              $selectedDeployMode = ""
+              $selectedRelayPath = "/api"
+            }
+            $selectedProjectName = ""
+            if ($deleteResult.ContainsKey("Scope") -and -not [string]::IsNullOrWhiteSpace([string]$deleteResult.Scope)) {
+              $scope = Normalize-ScopeForCli -Scope ([string]$deleteResult.Scope)
+            }
+            Write-Host ""
+            Write-Host "Project removed. Returning to the main menu." -ForegroundColor Yellow
+          }
+        }
         "1" {
           $selected = Select-ProjectFromList -Scope $scope -TokenStorePath $tokenStorePath
           if ($null -ne $selected) {
