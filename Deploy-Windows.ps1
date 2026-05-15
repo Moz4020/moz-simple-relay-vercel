@@ -615,9 +615,9 @@ function Load-Scope([string]$Path) {
 }
 
 function Get-VercelTeamSlugs {
-  $args = @("teams", "ls", "--no-color")
+  $args = @("teams", "ls", "--no-color", "--non-interactive")
   $args += (Get-VercelTokenArgs)
-  $result = Invoke-NativeSafe -FilePath $VercelExe -Arguments $args
+  $result = Invoke-NativeSafe -FilePath $VercelExe -Arguments $args -TimeoutSec 20
   if ($result.ExitCode -ne 0) { return @() }
   $slugs = @()
   foreach ($line in $result.Output) {
@@ -647,9 +647,7 @@ function Normalize-ScopeForCli([string]$Scope) {
 function Validate-Scope([string]$Scope) {
   $s = Normalize-ScopeForCli -Scope $Scope
   if ([string]::IsNullOrWhiteSpace($s)) { return $true }
-  $slugs = Get-VercelTeamSlugs
-  if ($slugs.Count -eq 0) { return $true }
-  return ($slugs -contains $s)
+  return ($s -match '^[a-zA-Z0-9][a-zA-Z0-9\-_]+$')
 }
 
 function Save-TokenSecure([string]$Token, [string]$Path) {
@@ -700,6 +698,8 @@ function Invoke-NativeSafe {
   $psi.RedirectStandardError = $true
   $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
   $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+  $psi.EnvironmentVariables["NO_UPDATE_NOTIFIER"] = "1"
+  $psi.EnvironmentVariables["VERCEL_NO_UPDATE_NOTIFIER"] = "1"
   $psi.Arguments = ($escaped -join ' ')
 
   $proc = New-Object System.Diagnostics.Process
@@ -778,6 +778,8 @@ function Invoke-NativeSafeWithInput {
   $psi.RedirectStandardError = $true
   $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
   $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+  $psi.EnvironmentVariables["NO_UPDATE_NOTIFIER"] = "1"
+  $psi.EnvironmentVariables["VERCEL_NO_UPDATE_NOTIFIER"] = "1"
   $psi.Arguments = ($escaped -join ' ')
 
   $proc = New-Object System.Diagnostics.Process
@@ -956,10 +958,9 @@ function Ensure-VercelLogin([string]$OutputDir, [string]$TokenStorePath) {
     $token = ([string]$token).Trim().Trim('"').Trim("'")
     $env:VERCEL_TOKEN = $token
 
-    # Auth check strategy (robust):
-    # 1) API direct check (most reliable)
-    # 2) CLI whoami --token
-    # 3) CLI whoami (uses VERCEL_TOKEN from env)
+    # Auth check strategy:
+    # 1) API direct check first. If it works, skip CLI checks because the CLI can hang on update/cache work.
+    # 2) CLI whoami fallback only when the API check does not validate the token.
     $apiOk = $false
     $apiErr = ""
     try {
@@ -971,8 +972,13 @@ function Ensure-VercelLogin([string]$OutputDir, [string]$TokenStorePath) {
       $apiErr = $_.Exception.Message
     }
 
-    $tokenWhoami = Invoke-NativeSafe -FilePath $VercelExe -Arguments @("whoami", "--token", $token)
-    $envWhoami = Invoke-NativeSafe -FilePath $VercelExe -Arguments @("whoami")
+    if ($apiOk) {
+      Write-Host "Token validated by API." -ForegroundColor Green
+      return
+    }
+
+    $tokenWhoami = Invoke-NativeSafe -FilePath $VercelExe -Arguments @("whoami", "--token", $token, "--no-color", "--non-interactive") -TimeoutSec 30
+    $envWhoami = Invoke-NativeSafe -FilePath $VercelExe -Arguments @("whoami", "--no-color", "--non-interactive") -TimeoutSec 30
 
     $cliOk = ($tokenWhoami.ExitCode -eq 0 -or $envWhoami.ExitCode -eq 0)
     if (-not $apiOk -and -not $cliOk) {
@@ -992,9 +998,7 @@ function Ensure-VercelLogin([string]$OutputDir, [string]$TokenStorePath) {
       Write-Host " 3) If team project: ensure correct scope/team slug"
       throw "Token auth failed. Please create a new token and retry."
     }
-    if ($apiOk -and $tokenWhoami.ExitCode -ne 0 -and $envWhoami.ExitCode -ne 0) {
-      Write-Host "Token validated by API. Continuing (CLI whoami check skipped)." -ForegroundColor Green
-    } elseif ($tokenWhoami.ExitCode -eq 0) {
+    if ($tokenWhoami.ExitCode -eq 0) {
       $tokenWhoami.Output | Out-Host
     } elseif ($envWhoami.ExitCode -eq 0) {
       $envWhoami.Output | Out-Host
@@ -1004,7 +1008,7 @@ function Ensure-VercelLogin([string]$OutputDir, [string]$TokenStorePath) {
     return
   }
 
-  $whoamiResult = Invoke-NativeSafe -FilePath $VercelExe -Arguments @("whoami")
+  $whoamiResult = Invoke-NativeSafe -FilePath $VercelExe -Arguments @("whoami", "--no-color", "--non-interactive") -TimeoutSec 30
   $loggedIn = $whoamiResult.ExitCode -eq 0
 
   if ($authMode -eq "1" -and $loggedIn) {
@@ -1012,7 +1016,7 @@ function Ensure-VercelLogin([string]$OutputDir, [string]$TokenStorePath) {
     $useCurrent = Read-Default "Use current logged-in session? (Y/n)" "y"
     if ($useCurrent.ToLowerInvariant() -eq "n") {
       Write-Step "Logging out and creating a fresh login link..."
-      $logoutResult = Invoke-NativeSafe -FilePath $VercelExe -Arguments @("logout")
+      $logoutResult = Invoke-NativeSafe -FilePath $VercelExe -Arguments @("logout", "--no-color", "--non-interactive") -TimeoutSec 30
       $logoutResult.Output | Out-Host
       Start-VercelOobLogin -OutputDir $OutputDir
     }
@@ -1020,44 +1024,24 @@ function Ensure-VercelLogin([string]$OutputDir, [string]$TokenStorePath) {
     Start-VercelOobLogin -OutputDir $OutputDir
   }
 
-  & $VercelExe whoami | Out-Host
+  $finalWhoami = Invoke-NativeSafe -FilePath $VercelExe -Arguments @("whoami", "--no-color", "--non-interactive") -TimeoutSec 30
+  $finalWhoami.Output | Out-Host
 }
 
 function Resolve-SessionScope([string]$ScopeStorePath) {
   $savedScope = Normalize-ScopeForCli -Scope (Load-Scope -Path $ScopeStorePath)
   if (-not [string]::IsNullOrWhiteSpace($savedScope)) {
     if (-not (Validate-Scope -Scope $savedScope)) {
-      Write-Host "Saved scope '$savedScope' is invalid and will be ignored." -ForegroundColor Red
+      Write-Host "Saved scope '$savedScope' has invalid characters and will be ignored." -ForegroundColor Red
       Save-Scope -Scope "" -Path $ScopeStorePath
       $savedScope = ""
     }
   }
   if (-not [string]::IsNullOrWhiteSpace($savedScope)) {
-    $useSaved = Read-Default ("Use saved scope/team '{0}'? (Y/n)" -f $savedScope) "y"
-    if ($useSaved.ToLowerInvariant() -ne "n") {
-      return $savedScope
-    }
+    Write-Host ("Using saved scope/team: {0}" -f $savedScope) -ForegroundColor DarkGray
+    return $savedScope
   }
-
-  Write-Host ""
-  Write-Host "Scope note: enter your Vercel team slug to avoid wrong CLI context." -ForegroundColor DarkYellow
-  $teams = Get-VercelTeamSlugs
-  if ($teams.Count -gt 0) {
-    Write-Host "Detected team slugs: $($teams -join ', ')" -ForegroundColor Cyan
-  }
-  while ($true) {
-    $scopeInput = Read-Optional "Scope slug/team (optional, press Enter for personal account)"
-    $scope = Normalize-ScopeForCli -Scope $scopeInput
-    if ([string]::IsNullOrWhiteSpace($scope)) {
-      Save-Scope -Scope "" -Path $ScopeStorePath
-      return ""
-    }
-    if (Validate-Scope -Scope $scope) {
-      Save-Scope -Scope $scope -Path $ScopeStorePath
-      return $scope
-    }
-    Write-Host "Scope '$scope' does not exist. Enter a valid team slug or press Enter for personal account." -ForegroundColor Red
-  }
+  return ""
 }
 
 function Ensure-VercelProject([string]$ProjectName, [string]$Scope) {
@@ -2893,10 +2877,113 @@ function Get-BillingRowColor([string]$ServiceName, [double]$Quantity, [string]$U
   return "Gray"
 }
 
+function Get-FirstNumberFromObject($Obj, [string[]]$Names) {
+  foreach ($name in $Names) {
+    $value = Get-ObjectPropertyValue -Obj $Obj -Names @($name)
+    if ($null -ne $value) { return (Convert-ToDoubleSafe $value) }
+  }
+  return 0.0
+}
+
+function Convert-VercelUsageCliToBillingRows($UsageObj) {
+  if ($null -eq $UsageObj) { return @() }
+
+  $items = @()
+  foreach ($name in @("services", "Services", "products", "Products", "usage", "Usage", "items", "Items", "rows", "Rows")) {
+    $candidate = Get-ObjectPropertyValue -Obj $UsageObj -Names @($name)
+    if ($null -ne $candidate) {
+      if ($candidate -is [System.Array]) { $items = @($candidate) } else { $items = @($candidate) }
+      break
+    }
+  }
+  if ($items.Count -eq 0 -and $UsageObj -is [System.Array]) {
+    $items = @($UsageObj)
+  }
+
+  $rows = @()
+  foreach ($item in $items) {
+    if ($null -eq $item) { continue }
+    $service = [string](Get-ObjectPropertyValue -Obj $item -Names @("ServiceName", "serviceName", "Product", "product", "Name", "name", "label", "Label"))
+    $usageObj = Get-ObjectPropertyValue -Obj $item -Names @("usage", "Usage", "quantity", "Quantity", "total", "Total")
+    $unit = [string](Get-ObjectPropertyValue -Obj $item -Names @("ConsumedUnit", "consumedUnit", "Unit", "unit"))
+    $quantity = Get-FirstNumberFromObject -Obj $item -Names @("ConsumedQuantity", "consumedQuantity", "UsageQuantity", "usageQuantity", "quantity", "Quantity", "amount", "Amount", "value", "Value")
+
+    if ($null -ne $usageObj -and -not ($usageObj -is [string])) {
+      if ([string]::IsNullOrWhiteSpace($unit)) {
+        $unit = [string](Get-ObjectPropertyValue -Obj $usageObj -Names @("unit", "Unit", "label", "Label"))
+      }
+      if ($quantity -eq 0) {
+        $quantity = Get-FirstNumberFromObject -Obj $usageObj -Names @("amount", "Amount", "value", "Value", "quantity", "Quantity", "total", "Total")
+      }
+    } elseif ($quantity -eq 0) {
+      $quantity = Convert-ToDoubleSafe $usageObj
+    }
+
+    $billedObj = Get-ObjectPropertyValue -Obj $item -Names @("billedCost", "BilledCost", "charge", "Charge", "cost", "Cost")
+    $effectiveObj = Get-ObjectPropertyValue -Obj $item -Names @("effectiveCost", "EffectiveCost", "value", "Value")
+    $billed = Convert-ToDoubleSafe $billedObj
+    $effective = Convert-ToDoubleSafe $effectiveObj
+    if ($billed -eq 0 -and $null -ne $billedObj -and -not ($billedObj -is [string])) {
+      $billed = Get-FirstNumberFromObject -Obj $billedObj -Names @("amount", "Amount", "value", "Value")
+    }
+    if ($effective -eq 0 -and $null -ne $effectiveObj -and -not ($effectiveObj -is [string])) {
+      $effective = Get-FirstNumberFromObject -Obj $effectiveObj -Names @("amount", "Amount", "value", "Value")
+    }
+
+    if ([string]::IsNullOrWhiteSpace($service)) { $service = "Unknown" }
+    $rows += [pscustomobject]@{
+      ServiceName = $service
+      ConsumedUnit = $unit
+      ConsumedQuantity = $quantity
+      BilledCost = $billed
+      EffectiveCost = $effective
+      ServiceCategory = "Vercel CLI usage"
+      Tags = @{}
+    }
+  }
+  return @($rows)
+}
+
+function Get-VercelUsageCliRows([string]$Scope, [string]$TokenStorePath, [DateTime]$From, [DateTime]$To) {
+  $args = @("usage", "--format", "json", "--from", $From.ToString("yyyy-MM-dd"), "--to", $To.ToString("yyyy-MM-dd"), "--no-color", "--non-interactive")
+  if (-not [string]::IsNullOrWhiteSpace($Scope)) {
+    $args += @("--scope", $Scope)
+  }
+  $args += (Get-VercelTokenArgs)
+
+  $result = Invoke-NativeSafe -FilePath $VercelExe -Arguments $args -TimeoutSec 120
+  if ($result.ExitCode -ne 0) {
+    $rawErr = (($result.Output | Select-Object -First 6) -join " ")
+    throw ("Vercel CLI usage fallback failed. {0}" -f $rawErr)
+  }
+
+  $raw = (($result.Output | Out-String).Trim())
+  $objectStart = $raw.IndexOf("{")
+  $arrayStart = $raw.IndexOf("[")
+  if ($objectStart -ge 0 -and ($arrayStart -lt 0 -or $objectStart -lt $arrayStart)) {
+    $start = $objectStart
+    $end = $raw.LastIndexOf("}")
+  } else {
+    $start = $arrayStart
+    $end = $raw.LastIndexOf("]")
+  }
+  if ($start -lt 0 -or $end -lt $start) {
+    throw "Vercel CLI usage fallback did not return JSON. Update Vercel CLI and try again."
+  }
+
+  $json = $raw.Substring($start, ($end - $start + 1))
+  $obj = $json | ConvertFrom-Json -ErrorAction Stop
+  return @{
+    Source = "Vercel CLI usage"
+    Scope = $Scope
+    Rows = @(Convert-VercelUsageCliToBillingRows -UsageObj $obj)
+  }
+}
+
 function Get-VercelBillingCharges([string]$Scope, [string]$TokenStorePath, [DateTime]$From, [DateTime]$To) {
   $token = Get-VercelApiToken -TokenStorePath $TokenStorePath
   if ([string]::IsNullOrWhiteSpace($token)) {
-    throw "No API token available. Use token auth mode first."
+    return (Get-VercelUsageCliRows -Scope $Scope -TokenStorePath $TokenStorePath -From $From -To $To)
   }
   $fromIso = $From.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
   $toIso = $To.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
@@ -2907,6 +2994,7 @@ function Get-VercelBillingCharges([string]$Scope, [string]$TokenStorePath, [Date
     try {
       $rows = Invoke-VercelApiGetJsonLines -Path $path -Token $token -Scope $sc
       return @{
+        Source = "Vercel REST API"
         Scope = $sc
         Rows = @($rows)
       }
@@ -2914,7 +3002,14 @@ function Get-VercelBillingCharges([string]$Scope, [string]$TokenStorePath, [Date
       $lastErr = Get-ApiErrorText $_
     }
   }
-  throw ("Could not load billing usage from Vercel API. {0}" -f $lastErr)
+
+  try {
+    $fallback = Get-VercelUsageCliRows -Scope $Scope -TokenStorePath $TokenStorePath -From $From -To $To
+    $fallback.ApiError = $lastErr
+    return $fallback
+  } catch {
+    throw ("Could not load billing usage from Vercel API or CLI. API: {0} CLI: {1}" -f $lastErr, (Get-ApiErrorText $_))
+  }
 }
 
 function Get-BillingProjectTagText($Row, [string]$TagName) {
@@ -2929,7 +3024,7 @@ function Get-BillingProjectTagText($Row, [string]$TagName) {
 
 function Show-BillingUsageMonitor([string]$ProjectName, [string]$Scope, [string]$TokenStorePath) {
   Write-Step "Billing / Usage monitor"
-  Write-Host "Data source: Vercel REST API /v1/billing/charges (FOCUS JSONL)." -ForegroundColor Cyan
+  Write-Host "Data source: Vercel REST API, with Vercel CLI usage fallback." -ForegroundColor Cyan
   Write-Host "Plan limits shown as 23GB/100GB style are estimated Pro allowances when Vercel does not return limits in charge rows." -ForegroundColor DarkGray
   Write-Host ""
   Write-Host "[0] Back to main menu"
@@ -2977,6 +3072,9 @@ function Show-BillingUsageMonitor([string]$ProjectName, [string]$Scope, [string]
   Write-Host ("Window: {0} -> {1}" -f $from.ToString("yyyy-MM-dd HH:mm"), $to.ToString("yyyy-MM-dd HH:mm")) -ForegroundColor Cyan
   if (-not [string]::IsNullOrWhiteSpace([string]$loaded.Scope)) {
     Write-Host ("Scope used: {0}" -f [string]$loaded.Scope) -ForegroundColor DarkGray
+  }
+  if ($loaded.ContainsKey("Source") -and -not [string]::IsNullOrWhiteSpace([string]$loaded.Source)) {
+    Write-Host ("Data source used: {0}" -f [string]$loaded.Source) -ForegroundColor DarkGray
   }
   if ($filterProject) {
     Write-Host ("Project filter: {0}" -f $ProjectName) -ForegroundColor DarkGray
@@ -3422,12 +3520,6 @@ function Run-DeleteProjectFlow([string]$Scope, [string]$TokenStorePath) {
     ProjectName = $projectName
     Scope = $projectScope
   }
-}
-
-function Select-ProjectOrNewAfterDelete([string]$Scope, [string]$TokenStorePath) {
-  Write-Step "Choose next project"
-  Write-Host "Project list refreshed after deletion." -ForegroundColor Cyan
-  return (Select-ProjectOrNewForFirstRun -Scope $Scope -TokenStorePath $TokenStorePath)
 }
 
 function Convert-JsonLineSafe([string]$Line) {
@@ -4522,13 +4614,124 @@ function Run-RegionABCompare([string]$ProjectName, [string]$Scope, [string]$Rela
   }
 }
 
-function Show-ManageMenu($selectedProjectName, $scope) {
-  Write-Banner
-  Write-PreflightNotice
+function Write-CurrentTarget($selectedProjectName, $scope) {
   Write-Host ""
   Write-Host "Current target project:" -ForegroundColor Cyan
   if ($selectedProjectName) { Write-Host "Project: $selectedProjectName" } else { Write-Host "Project: (not selected)" }
   if ($scope) { Write-Host "Scope:   $scope" } else { Write-Host "Scope:   (default)" }
+  Write-Host ""
+}
+
+function Show-MainActionMenu($selectedProjectName, $scope) {
+  Write-Banner
+  Write-PreflightNotice
+  Write-CurrentTarget -selectedProjectName $selectedProjectName -scope $scope
+  Write-Host "Main Menu" -ForegroundColor Cyan
+  Write-Host "[1] Deployment"
+  Write-Host "[2] Health Test"
+  Write-Host "[3] Project Management"
+  Write-Host "[0] Exit"
+  return (Read-Default "Choose section" "1")
+}
+
+function Show-DeploymentMenu($selectedProjectName, $scope) {
+  Write-Banner
+  Write-CurrentTarget -selectedProjectName $selectedProjectName -scope $scope
+  Write-Host "Deployment" -ForegroundColor Cyan
+  Write-Host "[1] Redeploy selected project"
+  Write-Host "[2] Update production ENV vars"
+  Write-Host "[3] List recent deployments"
+  Write-Host "[4] Deploy as NEW project"
+  Write-Host "[0] Back"
+  $choice = Read-Default "Choose action" "1"
+  switch ($choice) {
+    "1" { return "2" }
+    "2" { return "3" }
+    "3" { return "4" }
+    "4" { return "5" }
+    "0" { return "__BACK__" }
+    default { return "__INVALID__" }
+  }
+}
+
+function Show-HealthTestMenu($selectedProjectName, $scope) {
+  Write-Banner
+  Write-CurrentTarget -selectedProjectName $selectedProjectName -scope $scope
+  Write-Host "Health Test" -ForegroundColor Cyan
+  Write-Host "[1] Run health + smoke checks"
+  Write-Host "[2] Show readable logs"
+  Write-Host "[3] Run load-test lite"
+  Write-Host "[4] ENV drift detector"
+  Write-Host "[5] Profile benchmark runner"
+  Write-Host "[6] Live readable logs"
+  Write-Host "[7] View deployment ENV config"
+  Write-Host "[8] Billing / Usage monitor"
+  Write-Host "[0] Back"
+  $choice = Read-Default "Choose action" "1"
+  switch ($choice) {
+    "1" { return "6" }
+    "2" { return "7" }
+    "3" { return "8" }
+    "4" { return "9" }
+    "5" { return "10" }
+    "6" { return "11" }
+    "7" { return "12" }
+    "8" { return "14" }
+    "0" { return "__BACK__" }
+    default { return "__INVALID__" }
+  }
+}
+
+function Show-ProjectManagementMenu($selectedProjectName, $scope) {
+  Write-Banner
+  Write-CurrentTarget -selectedProjectName $selectedProjectName -scope $scope
+  Write-Host "Project Management" -ForegroundColor Cyan
+  Write-Host "[1] Select project from Vercel list"
+  Write-Host "[2] Delete project"
+  Write-Host "[0] Back"
+  $choice = Read-Default "Choose action" "1"
+  switch ($choice) {
+    "1" { return "1" }
+    "2" { return "13" }
+    "0" { return "__BACK__" }
+    default { return "__INVALID__" }
+  }
+}
+
+function Show-ManageMenu($selectedProjectName, $scope) {
+  while ($true) {
+    $section = Show-MainActionMenu -selectedProjectName $selectedProjectName -scope $scope
+    switch ($section) {
+      "1" {
+        $action = Show-DeploymentMenu -selectedProjectName $selectedProjectName -scope $scope
+        if ($action -eq "__BACK__") { continue }
+        return $action
+      }
+      "2" {
+        $action = Show-HealthTestMenu -selectedProjectName $selectedProjectName -scope $scope
+        if ($action -eq "__BACK__") { continue }
+        return $action
+      }
+      "3" {
+        $action = Show-ProjectManagementMenu -selectedProjectName $selectedProjectName -scope $scope
+        if ($action -eq "__BACK__") { continue }
+        return $action
+      }
+      "0" {
+        return "15"
+      }
+      default {
+        Write-Host "Invalid option." -ForegroundColor Red
+        Read-Host "Press Enter to return to main menu"
+      }
+    }
+  }
+}
+
+function Show-LegacyManageMenu($selectedProjectName, $scope) {
+  Write-Banner
+  Write-PreflightNotice
+  Write-CurrentTarget -selectedProjectName $selectedProjectName -scope $scope
   Write-Host ""
   Write-Host "[1] Select project from Vercel list"
   Write-Host "[2] Redeploy selected project"
@@ -4557,30 +4760,14 @@ function Run-ManagementLoop([string]$InitialScope) {
   $selectedDeployMode = ""
   $selectedRelayPath = "/api"
 
-  $firstChoice = Select-ProjectOrNewForFirstRun -Scope $scope -TokenStorePath $tokenStorePath
-  if ($firstChoice.Mode -eq "existing") {
-    $selectedProjectName = $firstChoice.ProjectName
-    if (-not [string]::IsNullOrWhiteSpace($firstChoice.Scope)) {
-      $scope = Normalize-ScopeForCli -Scope $firstChoice.Scope
-    }
-    Ensure-LinkedToProject -ProjectName $selectedProjectName -Scope $scope
+  if ($link.ProjectName) {
+    $selectedProjectName = [string]$link.ProjectName
+    if ($link.Scope) { $scope = Normalize-ScopeForCli -Scope ([string]$link.Scope) }
     $savedState = Load-LocalProjectDeployState -ProjectName $selectedProjectName
     if ($null -ne $savedState) {
       $selectedRuntime = [string]$savedState.Runtime
       $selectedDeployMode = [string]$savedState.DeployMode
       if (-not [string]::IsNullOrWhiteSpace([string]$savedState.RelayPath)) { $selectedRelayPath = [string]$savedState.RelayPath }
-    }
-    Write-Host "Selected project: $selectedProjectName" -ForegroundColor Green
-  } else {
-    $newCfg = Run-NewDeploymentFlow -DefaultScope $scope
-    if ($null -ne $newCfg) {
-      $selectedRuntime = [string]$newCfg.Runtime
-      $selectedDeployMode = [string]$newCfg.DeployMode
-      $selectedRelayPath = [string]$newCfg.PublicRelayPath
-      Save-LocalProjectDeployState -ProjectName ([string]$newCfg.ProjectName) -Scope ([string]$newCfg.Scope) -DeployMode $selectedDeployMode -Runtime $selectedRuntime -RelayPath $selectedRelayPath
-      $link = Get-LinkedProjectInfo -ProjectRoot $scriptDir
-      if ($link.ProjectName) { $selectedProjectName = $link.ProjectName }
-      if ($link.Scope) { $scope = $link.Scope }
     }
   }
 
@@ -4761,38 +4948,7 @@ function Run-ManagementLoop([string]$InitialScope) {
               $scope = Normalize-ScopeForCli -Scope ([string]$deleteResult.Scope)
             }
             Write-Host ""
-            Write-Host "Project removed. Now choose another project or deploy a new one." -ForegroundColor Yellow
-
-            $nextChoice = Select-ProjectOrNewAfterDelete -Scope $scope -TokenStorePath $tokenStorePath
-            if ($null -eq $nextChoice) { break }
-            if ($nextChoice.Mode -eq "existing") {
-              $selectedProjectName = [string]$nextChoice.ProjectName
-              if (-not [string]::IsNullOrWhiteSpace([string]$nextChoice.Scope)) {
-                $scope = Normalize-ScopeForCli -Scope ([string]$nextChoice.Scope)
-              }
-              Ensure-LinkedToProject -ProjectName $selectedProjectName -Scope $scope
-              $selectedRuntime = ""
-              $selectedDeployMode = ""
-              $selectedRelayPath = "/api"
-              $savedState = Load-LocalProjectDeployState -ProjectName $selectedProjectName
-              if ($null -ne $savedState) {
-                $selectedRuntime = [string]$savedState.Runtime
-                $selectedDeployMode = [string]$savedState.DeployMode
-                if (-not [string]::IsNullOrWhiteSpace([string]$savedState.RelayPath)) { $selectedRelayPath = [string]$savedState.RelayPath }
-              }
-              Write-Host ("Selected project: {0}" -f $selectedProjectName) -ForegroundColor Green
-            } elseif ($nextChoice.Mode -eq "new") {
-              $newCfg = Run-NewDeploymentFlow -DefaultScope $scope
-              if ($null -ne $newCfg) {
-                $selectedRuntime = [string]$newCfg.Runtime
-                $selectedDeployMode = [string]$newCfg.DeployMode
-                $selectedRelayPath = [string]$newCfg.PublicRelayPath
-                Save-LocalProjectDeployState -ProjectName ([string]$newCfg.ProjectName) -Scope ([string]$newCfg.Scope) -DeployMode $selectedDeployMode -Runtime $selectedRuntime -RelayPath $selectedRelayPath
-                $newLink = Get-LinkedProjectInfo -ProjectRoot $scriptDir
-                if ($newLink.ProjectName) { $selectedProjectName = $newLink.ProjectName }
-                if ($newLink.Scope) { $scope = $newLink.Scope }
-              }
-            }
+            Write-Host "Project removed. Returning to the main menu." -ForegroundColor Yellow
           }
         }
         "14" {
