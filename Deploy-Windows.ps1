@@ -1817,7 +1817,6 @@ function Apply-ProductionEnv($cfg) {
   Write-Step "Setting environment variables for production..."
   if ($cfg.Runtime -eq "rewrite") {
     Write-Host "Rewrite mode uses vercel.json rewrite rules. No production ENV vars are needed or deployed for this mode." -ForegroundColor DarkYellow
-    Clear-RelayProductionEnv -Scope $cfg.Scope
     return
   }
   Set-VercelEnv -Name "TARGET_DOMAIN" -Value $cfg.TargetDomain -Target "production" -Scope $cfg.Scope
@@ -1845,9 +1844,6 @@ function Run-NewDeploymentFlow([string]$DefaultScope) {
   if ($null -eq $cfg) { return $null }
   Ensure-VercelProject -ProjectName $cfg.ProjectName -Scope $cfg.Scope
   Ensure-LinkedToProject -ProjectName $cfg.ProjectName -Scope $cfg.Scope
-  if ($cfg.Runtime -eq "node") {
-    Clear-RelayProductionEnv -Scope $cfg.Scope
-  }
   Apply-ProductionEnv -cfg $cfg
   if ($cfg.Runtime -eq "node") {
     $null = Apply-ProjectRuntimeSettings -ProjectName $cfg.ProjectName -Scope $cfg.Scope -TokenStorePath $tokenStorePath -Region $cfg.Region -FunctionTimeoutSec $cfg.FunctionTimeoutSec -FluidEnabled $cfg.FluidEnabled -FunctionCpu $cfg.FunctionCpu
