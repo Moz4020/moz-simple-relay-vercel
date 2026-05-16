@@ -117,11 +117,11 @@ function Choose-DeploymentMode {
   Write-Host "[4] FAST PIPE SIMPLE MODERN  (Modern single rule / No headers / No Fluid cost)" -ForegroundColor Green
   Write-Host "    Single rewrite only: /path/:path* -> upstream/path/:path*. No headers, no key, no base path, no fallback."
   Write-Host ""
-  Write-Host "[5] BALANCED   (Node + Fluid ON)" -ForegroundColor Cyan
-  Write-Host "    Lower timeout profile for normal usage. 256 conn | 5 MB/s up/down | 60s upstream | 800s function."
+  Write-Host "[5] HOBBY BALANCED   (Node + Fluid ON / Hobby-safe)" -ForegroundColor Cyan
+  Write-Host "    Hobby tier profile. 128 conn | 3 MB/s up/down | 45s upstream | 60s function."
   Write-Host ""
-  Write-Host "[6] MAX CONN   (Node + Fluid ON)" -ForegroundColor Cyan
-  Write-Host "    Higher capacity profile. 512 conn | 10 MB/s up/down | 60s upstream | 800s function."
+  Write-Host "[6] PRO BALANCED   (Node + Fluid ON)" -ForegroundColor Cyan
+  Write-Host "    Pro/Enterprise profile. 256 conn | 5 MB/s up/down | 60s upstream | 800s function."
   Write-Host ""
   Write-Host "[7] CUSTOM     (Manual)" -ForegroundColor Yellow
   Write-Host "    Set runtime, Fluid, regions, CPU, duration, limits, timeout and logs yourself."
@@ -274,16 +274,16 @@ function Choose-DeploymentMode {
     "5" {
       return @{
         Canceled = $false
-        ModeKey = "BALANCED_LOW_TIMEOUT"
+        ModeKey = "HOBBY_BALANCED"
         Runtime = "node"
         RewriteStyle = ""
         RewriteSecurity = ""
         FluidEnabled = $true
-        MaxInflight = "256"
-        MaxUpBps = "5242880"
-        MaxDownBps = "5242880"
-        UpstreamTimeoutMs = "60000"
-        FunctionTimeoutSec = 800
+        MaxInflight = "128"
+        MaxUpBps = "3145728"
+        MaxDownBps = "3145728"
+        UpstreamTimeoutMs = "45000"
+        FunctionTimeoutSec = 60
         FunctionCpu = "standard"
         RunStressAfterDeploy = $false
         RequireRelayKey = $false
@@ -292,14 +292,14 @@ function Choose-DeploymentMode {
     "6" {
       return @{
         Canceled = $false
-        ModeKey = "MAX_STABILITY_HIGH_CONN"
+        ModeKey = "PRO_BALANCED"
         Runtime = "node"
         RewriteStyle = ""
         RewriteSecurity = ""
         FluidEnabled = $true
-        MaxInflight = "512"
-        MaxUpBps = "10485760"
-        MaxDownBps = "10485760"
+        MaxInflight = "256"
+        MaxUpBps = "5242880"
+        MaxDownBps = "5242880"
         UpstreamTimeoutMs = "60000"
         FunctionTimeoutSec = 800
         FunctionCpu = "standard"
@@ -1030,17 +1030,11 @@ function Ensure-VercelLogin([string]$OutputDir, [string]$TokenStorePath) {
 
 function Resolve-SessionScope([string]$ScopeStorePath) {
   $savedScope = Normalize-ScopeForCli -Scope (Load-Scope -Path $ScopeStorePath)
-  if (-not [string]::IsNullOrWhiteSpace($savedScope)) {
-    if (-not (Validate-Scope -Scope $savedScope)) {
-      Write-Host "Saved scope '$savedScope' has invalid characters and will be ignored." -ForegroundColor Red
-      Save-Scope -Scope "" -Path $ScopeStorePath
-      $savedScope = ""
-    }
+  if (-not [string]::IsNullOrWhiteSpace($savedScope) -and -not (Validate-Scope -Scope $savedScope)) {
+    Write-Host "Saved scope '$savedScope' has invalid characters and will be ignored." -ForegroundColor Red
+    Save-Scope -Scope "" -Path $ScopeStorePath
   }
-  if (-not [string]::IsNullOrWhiteSpace($savedScope)) {
-    Write-Host ("Using saved scope/team: {0}" -f $savedScope) -ForegroundColor DarkGray
-    return $savedScope
-  }
+  Write-Host "Scope/team will be asked during deploy actions to avoid stale saved scope mistakes." -ForegroundColor DarkGray
   return ""
 }
 
@@ -1163,6 +1157,46 @@ function Set-VercelEnv([string]$Name, [string]$Value, [string]$Target, [string]$
   $res.Output | Out-Host
   if ($res.ExitCode -ne 0) {
     throw "Failed to set env var $Name for $Target."
+  }
+}
+
+function Remove-VercelEnvIfExists([string]$Name, [string]$Target, [string]$Scope) {
+  $Scope = Normalize-ScopeForCli -Scope $Scope
+  $args = @("env", "rm", $Name, $Target, "--yes")
+  if (-not [string]::IsNullOrWhiteSpace($Scope)) { $args += @("--scope", $Scope) }
+  $args += (Get-VercelTokenArgs)
+  $res = Invoke-NativeSafe -FilePath $VercelExe -Arguments $args
+  $text = (($res.Output | Out-String).Trim())
+  if ($res.ExitCode -eq 0) {
+    if (-not [string]::IsNullOrWhiteSpace($text)) { $res.Output | Out-Host }
+    return
+  }
+  if ($text -match "(?i)(not found|does not exist|could not find|no environment variable)") {
+    Write-Host ("ENV {0} was already absent." -f $Name) -ForegroundColor DarkGray
+    return
+  }
+  if (-not [string]::IsNullOrWhiteSpace($text)) { $res.Output | Out-Host }
+  throw "Failed to remove env var $Name for $Target."
+}
+
+function Clear-RelayProductionEnv([string]$Scope) {
+  Write-Step "Cleaning Node relay environment variables from production..."
+  $keys = @(
+    "TARGET_DOMAIN",
+    "RELAY_PATH",
+    "PUBLIC_RELAY_PATH",
+    "LANDING_TEMPLATE",
+    "MAX_INFLIGHT",
+    "MAX_UP_BPS",
+    "MAX_DOWN_BPS",
+    "UPSTREAM_TIMEOUT_MS",
+    "SUCCESS_LOG_SAMPLE_RATE",
+    "SUCCESS_LOG_MIN_DURATION_MS",
+    "ERROR_LOG_MIN_INTERVAL_MS",
+    "RELAY_KEY"
+  )
+  foreach ($key in $keys) {
+    Remove-VercelEnvIfExists -Name $key -Target "production" -Scope $Scope
   }
 }
 
@@ -1574,7 +1608,7 @@ function Show-RewriteClientGuidance($cfg, $deployInfo) {
   Write-Host " - Test Mux ON with low concurrency first (4 or 8). If video stalls, test Mux OFF too." -ForegroundColor Cyan
   Write-Host " - If your client has heartbeat/keepalive, try 15-20 seconds. Very low values increase Edge Requests." -ForegroundColor Cyan
   Write-Host " - On the upstream server, keep BBR enabled and test MTU 1350/1280 only if mobile routes stall." -ForegroundColor Cyan
-  Write-Host " - For full control/log/throttle, use BALANCED or MAX CONN Node mode instead of rewrite." -ForegroundColor DarkYellow
+  Write-Host " - For full control/log/throttle, use HOBBY BALANCED or PRO BALANCED Node mode instead of rewrite." -ForegroundColor DarkYellow
 }
 
 function Get-LinkedTeamId([string]$ProjectRoot) {
@@ -1592,11 +1626,11 @@ function Get-LinkedTeamId([string]$ProjectRoot) {
 
 function Collect-NewDeploymentConfig([string]$DefaultScope) {
   Write-Step "Collecting config values..."
-  $DefaultScope = Normalize-ScopeForCli -Scope $DefaultScope
-  if ([string]::IsNullOrWhiteSpace($DefaultScope)) {
-    $scope = Read-Host "Scope slug/team (optional, press Enter to skip)"
-  } else {
-    $scope = Read-Default "Scope slug/team" $DefaultScope
+  Write-Host "Scope is asked on every deploy so an old saved team cannot be reused silently." -ForegroundColor DarkYellow
+  $scope = Read-Host "Scope slug/team (optional, Enter = personal/default, 0 = Back)"
+  if ($scope.Trim() -eq "0") {
+    Write-Host "Canceled. Returning to main menu." -ForegroundColor DarkYellow
+    return $null
   }
   $scope = Normalize-ScopeForCli -Scope $scope
   if (-not [string]::IsNullOrWhiteSpace($scope) -and -not (Validate-Scope -Scope $scope)) {
@@ -1783,6 +1817,7 @@ function Apply-ProductionEnv($cfg) {
   Write-Step "Setting environment variables for production..."
   if ($cfg.Runtime -eq "rewrite") {
     Write-Host "Rewrite mode uses vercel.json rewrite rules. No production ENV vars are needed or deployed for this mode." -ForegroundColor DarkYellow
+    Clear-RelayProductionEnv -Scope $cfg.Scope
     return
   }
   Set-VercelEnv -Name "TARGET_DOMAIN" -Value $cfg.TargetDomain -Target "production" -Scope $cfg.Scope
@@ -1810,6 +1845,9 @@ function Run-NewDeploymentFlow([string]$DefaultScope) {
   if ($null -eq $cfg) { return $null }
   Ensure-VercelProject -ProjectName $cfg.ProjectName -Scope $cfg.Scope
   Ensure-LinkedToProject -ProjectName $cfg.ProjectName -Scope $cfg.Scope
+  if ($cfg.Runtime -eq "node") {
+    Clear-RelayProductionEnv -Scope $cfg.Scope
+  }
   Apply-ProductionEnv -cfg $cfg
   if ($cfg.Runtime -eq "node") {
     $null = Apply-ProjectRuntimeSettings -ProjectName $cfg.ProjectName -Scope $cfg.Scope -TokenStorePath $tokenStorePath -Region $cfg.Region -FunctionTimeoutSec $cfg.FunctionTimeoutSec -FluidEnabled $cfg.FluidEnabled -FunctionCpu $cfg.FunctionCpu
@@ -1829,6 +1867,199 @@ function Run-NewDeploymentFlow([string]$DefaultScope) {
     Read-Host "Health/smoke checks finished. Press Enter to continue"
   }
   Write-Host "Done."
+  return $cfg
+}
+
+function Resolve-SelectedProjectForRedeploy([string]$SelectedProjectName, [string]$Scope) {
+  $projectName = [string]$SelectedProjectName
+  $projectScope = Normalize-ScopeForCli -Scope $Scope
+
+  if ([string]::IsNullOrWhiteSpace($projectName)) {
+    Write-Host "No project is selected yet. Choose one from the Vercel project list." -ForegroundColor DarkYellow
+    $scopeFilter = Read-Host "Scope filter for project list (optional, Enter = all token scopes, 0 = Back)"
+    if ($scopeFilter.Trim() -eq "0") { return $null }
+    $selected = Select-ProjectFromList -Scope (Normalize-ScopeForCli -Scope $scopeFilter) -TokenStorePath $tokenStorePath
+    if ($null -eq $selected) { return $null }
+    $projectName = [string]$selected.Name
+    if ($selected.PSObject.Properties.Name -contains "Scope" -and -not [string]::IsNullOrWhiteSpace([string]$selected.Scope)) {
+      $projectScope = Normalize-ScopeForCli -Scope ([string]$selected.Scope)
+    } else {
+      $projectScope = Normalize-ScopeForCli -Scope $scopeFilter
+    }
+  }
+
+  Write-Host ""
+  Write-Host ("Redeploy target project: {0}" -f $projectName) -ForegroundColor Cyan
+  if ([string]::IsNullOrWhiteSpace($projectScope)) {
+    $scopePrompt = "Scope slug/team for this deploy (optional, Enter = personal/default, 0 = Back)"
+  } else {
+    $scopePrompt = "Scope slug/team for this deploy (current: $projectScope, Enter = keep current, 0 = Back)"
+  }
+  $scopeRaw = Read-Host $scopePrompt
+  if ($scopeRaw.Trim() -eq "0") { return $null }
+  if (-not [string]::IsNullOrWhiteSpace($scopeRaw)) {
+    $projectScope = Normalize-ScopeForCli -Scope $scopeRaw
+  }
+  if (-not [string]::IsNullOrWhiteSpace($projectScope) -and -not (Validate-Scope -Scope $projectScope)) {
+    throw "Scope '$projectScope' does not exist. Enter a valid Vercel team slug."
+  }
+
+  return @{
+    ProjectName = $projectName
+    Scope = $projectScope
+  }
+}
+
+function Collect-RedeployConfig([string]$ProjectName, [string]$Scope) {
+  Write-Step "Collecting redeploy values..."
+  $mode = Choose-DeploymentMode
+  if ($mode.ContainsKey("Canceled") -and [bool]$mode.Canceled) {
+    Write-Host "Canceled. Returning to main menu." -ForegroundColor DarkYellow
+    return $null
+  }
+
+  $maxInflight = $mode.MaxInflight
+  $maxUpBps = $mode.MaxUpBps
+  $maxDownBps = $mode.MaxDownBps
+  $upstreamTimeoutMs = $mode.UpstreamTimeoutMs
+
+  $targetDomain = Read-Required "TARGET_DOMAIN (MUST be your foreign server inbound domain+port, example: https://your-domain.com:443, 0 = Back)"
+  if ($targetDomain -eq "0") {
+    Write-Host "Canceled. Returning to main menu." -ForegroundColor DarkYellow
+    return $null
+  }
+
+  $selectedRegion = ""
+  if ($mode.Runtime -eq "node") {
+    $selectedRegion = Choose-FunctionRegion -TargetDomain $targetDomain
+  }
+
+  Write-Host "RELAY_PATH guide: open your foreign server inbound, set a Path starting with '/'. Enter EXACT same value here." -ForegroundColor DarkYellow
+  $relayPathInput = Read-Required "RELAY_PATH (example: /api or /freedom, 0 = Back)"
+  if ($relayPathInput -eq "0") {
+    Write-Host "Canceled. Returning to main menu." -ForegroundColor DarkYellow
+    return $null
+  }
+  $relayPath = Normalize-PathLike $relayPathInput
+  $publicRelayPath = $relayPath
+  Write-Host ("PUBLIC_RELAY_PATH auto-set to RELAY_PATH: {0}" -f $publicRelayPath) -ForegroundColor DarkCyan
+
+  $landingTemplate = ""
+  $successLogSampleRate = ""
+  $successLogMinDurationMs = ""
+  $errorLogMinIntervalMs = ""
+  if ($mode.Runtime -eq "node") {
+    $landingTemplate = Read-Optional "LANDING_TEMPLATE (optional template folder name; empty = random each build)"
+    $successLogSampleRate = Read-Default "SUCCESS_LOG_SAMPLE_RATE" "0"
+    $successLogMinDurationMs = Read-Default "SUCCESS_LOG_MIN_DURATION_MS" "3000"
+    $errorLogMinIntervalMs = Read-Default "ERROR_LOG_MIN_INTERVAL_MS" "5000"
+  }
+
+  $relayKey = ""
+  if ($mode.Runtime -eq "rewrite") {
+    if ($mode.RewriteStyle -eq "simplelegacy" -or $mode.RewriteStyle -eq "simplemodern") {
+      Write-Host "FAST PIPE SIMPLE: no headers will be configured." -ForegroundColor Green
+      $relayKey = ""
+    } else {
+      Write-Host "RELAY_KEY is optional in Fast Pipe." -ForegroundColor DarkYellow
+      Write-Host "Leave it empty for no x-relay-key. If you set it, the client MUST send header x-relay-key with the exact same value." -ForegroundColor DarkYellow
+      $relayKey = Read-Optional "RELAY_KEY (optional; empty = no x-relay-key required, 0 = Back)"
+      if ($relayKey -eq "0") {
+        Write-Host "Canceled. Returning to main menu." -ForegroundColor DarkYellow
+        return $null
+      }
+    }
+  }
+
+  Write-Step "Redeploy config selected:"
+  Write-Host "TARGET_DOMAIN = $targetDomain"
+  Write-Host "PROJECT_NAME  = $ProjectName"
+  Write-Host "SCOPE         = $(if ([string]::IsNullOrWhiteSpace($Scope)) { "(personal/default)" } else { $Scope })"
+  Write-Host "DEPLOY_MODE   = $($mode.ModeKey)"
+  Write-Host "RUNTIME       = $($mode.Runtime)"
+  if ($mode.Runtime -eq "node") {
+    Write-Host ("FLUID_COMPUTE = {0}" -f $(if ($mode.FluidEnabled) { "on" } else { "off" }))
+    Write-Host ("FUNCTION_TIMEOUT_SEC     = {0}" -f $mode.FunctionTimeoutSec)
+    Write-Host ("FUNCTION_CPU             = {0}" -f $mode.FunctionCpu)
+    Write-Host "MAX_INFLIGHT  = $maxInflight"
+    Write-Host "MAX_UP_BPS    = $maxUpBps"
+    Write-Host "MAX_DOWN_BPS  = $maxDownBps"
+    Write-Host "UPSTREAM_TIMEOUT_MS        = $upstreamTimeoutMs"
+  } else {
+    Write-Host ("REWRITE_STYLE = {0}" -f $mode.RewriteStyle)
+    Write-Host "NODE_ENV_CLEANUP = enabled"
+  }
+  Write-Host "RELAY_PATH    = $relayPath"
+  Write-Host "PUBLIC_RELAY_PATH = $publicRelayPath"
+
+  return @{
+    ProjectName = $ProjectName
+    Scope = $Scope
+    DeployMode = $mode.ModeKey
+    Runtime = $mode.Runtime
+    RewriteStyle = $mode.RewriteStyle
+    RewriteSecurity = $mode.RewriteSecurity
+    FluidEnabled = [bool]$mode.FluidEnabled
+    FunctionTimeoutSec = [int]$mode.FunctionTimeoutSec
+    FunctionCpu = $mode.FunctionCpu
+    RelayKey = $relayKey
+    TargetDomain = $targetDomain
+    RelayPath = $relayPath
+    PublicRelayPath = $publicRelayPath
+    LandingTemplate = if ($mode.Runtime -eq "node") { $landingTemplate } else { "" }
+    MaxInflight = $maxInflight
+    MaxUpBps = $maxUpBps
+    MaxDownBps = $maxDownBps
+    UpstreamTimeoutMs = $upstreamTimeoutMs
+    SuccessLogSampleRate = $successLogSampleRate
+    SuccessLogMinDurationMs = $successLogMinDurationMs
+    ErrorLogMinIntervalMs = $errorLogMinIntervalMs
+    RunStressAfterDeploy = [bool]$mode.RunStressAfterDeploy
+    Region = $selectedRegion
+  }
+}
+
+function Run-RedeploySelectedFlow([string]$SelectedProjectName, [string]$Scope) {
+  $target = Resolve-SelectedProjectForRedeploy -SelectedProjectName $SelectedProjectName -Scope $Scope
+  if ($null -eq $target) { return $null }
+
+  $projectName = [string]$target.ProjectName
+  $projectScope = Normalize-ScopeForCli -Scope ([string]$target.Scope)
+  Ensure-LinkedToProject -ProjectName $projectName -Scope $projectScope
+  $previousState = Load-LocalProjectDeployState -ProjectName $projectName
+  $previousRuntime = ""
+  if ($null -ne $previousState -and -not [string]::IsNullOrWhiteSpace([string]$previousState.Runtime)) {
+    $previousRuntime = ([string]$previousState.Runtime).Trim().ToLowerInvariant()
+  }
+
+  $cfg = Collect-RedeployConfig -ProjectName $projectName -Scope $projectScope
+  if ($null -eq $cfg) { return $null }
+
+  if ($cfg.Runtime -eq "rewrite") {
+    if ($previousRuntime -eq "rewrite") {
+      Write-Host "Previous local state is already Fast Pipe rewrite; skipping ENV cleanup." -ForegroundColor DarkGray
+    } else {
+      Clear-RelayProductionEnv -Scope $cfg.Scope
+    }
+  } else {
+    Clear-RelayProductionEnv -Scope $cfg.Scope
+    Apply-ProductionEnv -cfg $cfg
+    $null = Apply-ProjectRuntimeSettings -ProjectName $cfg.ProjectName -Scope $cfg.Scope -TokenStorePath $tokenStorePath -Region $cfg.Region -FunctionTimeoutSec $cfg.FunctionTimeoutSec -FluidEnabled $cfg.FluidEnabled -FunctionCpu $cfg.FunctionCpu
+  }
+
+  $deployInfo = Deploy-Production -Scope $cfg.Scope -Region $cfg.Region -Runtime $cfg.Runtime -TargetDomain $cfg.TargetDomain -RelayPath $cfg.RelayPath -PublicRelayPath $cfg.PublicRelayPath -RelayKey $cfg.RelayKey -RewriteStyle $cfg.RewriteStyle
+  $cfg.VercelAuthentication = [string]$script:LastVercelAuthStatus
+  Show-DeploySummary $deployInfo
+  Show-RewriteClientGuidance -cfg $cfg -deployInfo $deployInfo
+  Export-ShareableConfigSummary -cfg $cfg -AliasUrl $deployInfo.Alias
+  Save-LocalProjectDeployState -ProjectName $cfg.ProjectName -Scope $cfg.Scope -DeployMode $cfg.DeployMode -Runtime $cfg.Runtime -RelayPath $cfg.PublicRelayPath
+  $runTests = Read-Default "Run essential health/smoke tests now? (Y/n)" "y"
+  if ($runTests.ToLowerInvariant() -ne "n") {
+    $testDomain = if (-not [string]::IsNullOrWhiteSpace([string]$deployInfo.Alias)) { [string]$deployInfo.Alias } else { "" }
+    Run-HealthAndSmokeChecks -ProjectName $cfg.ProjectName -RelayPath $cfg.PublicRelayPath -Runtime $cfg.Runtime -RelayKey $cfg.RelayKey -Domain $testDomain
+    Read-Host "Health/smoke checks finished. Press Enter to continue"
+  }
+  Write-Host "Redeploy complete." -ForegroundColor Green
   return $cfg
 }
 
@@ -4228,7 +4459,7 @@ function Get-IncidentAnalysis([string[]]$LogTexts) {
   }
   if ($joined -match "(?i)Task timed out after|upstream_timeout|504") {
     $issues += "Requests are timing out before completion."
-    $actions += "Increase UPSTREAM_TIMEOUT_MS (e.g. 60000) and keep maxDuration at 60."
+    $actions += "Increase UPSTREAM_TIMEOUT_MS (e.g. 60000) only if maxDuration and your plan allow the longer request lifetime."
     $actions += "Reduce per-connection speed or concurrency spikes to shorten request lifetime."
   }
   if ($joined -match "(?i)503|MAX_INFLIGHT|service unavailable") {
@@ -4292,8 +4523,10 @@ function Get-HttpStatusCodeSafe([string]$Url, [string]$Method = "GET", [int]$Tim
   }
 }
 
-function Run-HealthAndSmokeChecks([string]$ProjectName, [string]$RelayPath, [string]$Runtime = "node", [string]$RelayKey = "") {
-  $domain = "https://$ProjectName.vercel.app"
+function Run-HealthAndSmokeChecks([string]$ProjectName, [string]$RelayPath, [string]$Runtime = "node", [string]$RelayKey = "", [string]$Domain = "") {
+  $domain = ([string]$Domain).Trim().TrimEnd("/")
+  if ([string]::IsNullOrWhiteSpace($domain)) { $domain = "https://$ProjectName.vercel.app" }
+  if ($domain -notmatch '^[a-zA-Z][a-zA-Z0-9+\-.]*://') { $domain = "https://$domain" }
   $rp = if ($RelayPath.StartsWith("/")) { $RelayPath } else { "/$RelayPath" }
   $isRewrite = ([string]$Runtime).ToLowerInvariant() -eq "rewrite"
   $relayHeaders = $null
@@ -4366,6 +4599,58 @@ function Run-HealthAndSmokeChecks([string]$ProjectName, [string]$RelayPath, [str
     Write-Host "What to do: check that the target domain is online, the port is open, and the inbound service is running. If traffic is heavy, use a higher Node profile or increase timeout/capacity." -ForegroundColor Yellow
   } elseif ($st3 -ge 200 -and $st3 -lt 400) {
     Write-Host "Everything looks reachable from this quick check." -ForegroundColor Green
+  }
+}
+
+function Run-InteractiveHealthCheck([string]$SelectedProjectName, [string]$Scope, [string]$DefaultRelayPath = "/api", [string]$DefaultRuntime = "node") {
+  Write-Step "Health test target..."
+  $scopeFilter = Read-Host "Scope filter for project list (optional, Enter = all token scopes, 0 = Back)"
+  if ($scopeFilter.Trim() -eq "0") { return $null }
+  $selected = Select-ProjectFromList -Scope (Normalize-ScopeForCli -Scope $scopeFilter) -TokenStorePath $tokenStorePath
+  if ($null -eq $selected) {
+    Write-Host "Canceled. Returning to main menu." -ForegroundColor DarkYellow
+    return $null
+  }
+
+  $projectName = [string]$selected.Name
+  $projectScope = Normalize-ScopeForCli -Scope $scopeFilter
+  if ($selected.PSObject.Properties.Name -contains "Scope" -and -not [string]::IsNullOrWhiteSpace([string]$selected.Scope)) {
+    $projectScope = Normalize-ScopeForCli -Scope ([string]$selected.Scope)
+  }
+
+  $defaultDomain = "https://$projectName.vercel.app"
+  $domain = Read-Default "Deployment domain to check" $defaultDomain
+  if ($domain -eq "0") { return $null }
+
+  $state = Load-LocalProjectDeployState -ProjectName $projectName
+  $runtimeDefault = if ([string]::IsNullOrWhiteSpace($DefaultRuntime)) { "node" } else { [string]$DefaultRuntime }
+  $pathDefault = if ([string]::IsNullOrWhiteSpace($DefaultRelayPath)) { "/api" } else { [string]$DefaultRelayPath }
+  if ($null -ne $state) {
+    if (-not [string]::IsNullOrWhiteSpace([string]$state.Runtime)) { $runtimeDefault = [string]$state.Runtime }
+    if (-not [string]::IsNullOrWhiteSpace([string]$state.RelayPath)) { $pathDefault = [string]$state.RelayPath }
+  }
+
+  $runtimePick = Read-Default "Runtime for this check (node/rewrite)" $runtimeDefault
+  if ($runtimePick -eq "0") { return $null }
+  $runtime = if ($runtimePick.Trim().ToLowerInvariant() -eq "rewrite") { "rewrite" } else { "node" }
+
+  $pathRaw = Read-Default "Relay path to check" $pathDefault
+  if ($pathRaw -eq "0") { return $null }
+  $relayPath = Normalize-PathLike -PathValue $pathRaw
+
+  $relayKeyForCheck = ""
+  if ($runtime -eq "rewrite") {
+    Write-Host "If this Fast Pipe deploy uses RELAY_KEY, enter it for an accurate relay-path check." -ForegroundColor DarkYellow
+    $relayKeyForCheck = Read-Optional "x-relay-key for this check only (empty = no header, 0 = Back)"
+    if ($relayKeyForCheck -eq "0") { return $null }
+  }
+
+  Run-HealthAndSmokeChecks -ProjectName $projectName -RelayPath $relayPath -Runtime $runtime -RelayKey $relayKeyForCheck -Domain $domain
+  return @{
+    ProjectName = $projectName
+    Scope = $projectScope
+    Runtime = $runtime
+    RelayPath = $relayPath
   }
 }
 
@@ -4488,7 +4773,16 @@ function Get-EnvMapFromApi([string]$ProjectName, [string]$Scope, [string]$TokenS
 function Run-EnvDriftDetector([string]$ProjectName, [string]$Scope, [string]$TokenStorePath) {
   Write-Step "ENV drift detector"
   $profiles = @{
-    balanced = @{
+    hobby_balanced = @{
+      "UPSTREAM_TIMEOUT_MS" = "45000"
+      "MAX_INFLIGHT" = "128"
+      "MAX_UP_BPS" = "3145728"
+      "MAX_DOWN_BPS" = "3145728"
+      "SUCCESS_LOG_SAMPLE_RATE" = "0"
+      "SUCCESS_LOG_MIN_DURATION_MS" = "3000"
+      "ERROR_LOG_MIN_INTERVAL_MS" = "5000"
+    }
+    pro_balanced = @{
       "UPSTREAM_TIMEOUT_MS" = "60000"
       "MAX_INFLIGHT" = "256"
       "MAX_UP_BPS" = "5242880"
@@ -4497,25 +4791,17 @@ function Run-EnvDriftDetector([string]$ProjectName, [string]$Scope, [string]$Tok
       "SUCCESS_LOG_MIN_DURATION_MS" = "3000"
       "ERROR_LOG_MIN_INTERVAL_MS" = "5000"
     }
-    max_connection = @{
-      "UPSTREAM_TIMEOUT_MS" = "60000"
-      "MAX_INFLIGHT" = "512"
-      "MAX_UP_BPS" = "10485760"
-      "MAX_DOWN_BPS" = "10485760"
-      "SUCCESS_LOG_SAMPLE_RATE" = "0"
-      "SUCCESS_LOG_MIN_DURATION_MS" = "3000"
-      "ERROR_LOG_MIN_INTERVAL_MS" = "5000"
-    }
   }
 
-  Write-Host "Profiles: balanced | max_connection | 0 = Back" -ForegroundColor Cyan
+  Write-Host "Profiles: hobby_balanced | pro_balanced | 0 = Back" -ForegroundColor Cyan
   Write-Host "Profile here means: expected target values for this project's behavior." -ForegroundColor DarkGray
-  $p = Read-Default "Select baseline profile" "balanced"
+  $p = Read-Default "Select baseline profile" "hobby_balanced"
   if ($p -eq "0") {
     Write-Host "Canceled. Returning to main menu." -ForegroundColor DarkYellow
     return
   }
-  if (-not $profiles.ContainsKey($p)) { $p = "balanced" }
+  if ($p -eq "balanced") { $p = "pro_balanced" }
+  if (-not $profiles.ContainsKey($p)) { $p = "hobby_balanced" }
   $baseline = $profiles[$p]
 
   $current = Get-EnvMapFromApi -ProjectName $ProjectName -Scope $Scope -TokenStorePath $TokenStorePath
@@ -4868,17 +5154,15 @@ function Run-ManagementLoop([string]$InitialScope) {
           }
         }
         "2" {
-          if ([string]::IsNullOrWhiteSpace($selectedProjectName)) {
-            Write-Host "Select a project first (option 1)." -ForegroundColor Red
-            break
+          $redeployCfg = Run-RedeploySelectedFlow -SelectedProjectName $selectedProjectName -Scope $scope
+          if ($null -ne $redeployCfg) {
+            $selectedProjectName = [string]$redeployCfg.ProjectName
+            $scope = Normalize-ScopeForCli -Scope ([string]$redeployCfg.Scope)
+            $selectedRuntime = [string]$redeployCfg.Runtime
+            $selectedDeployMode = [string]$redeployCfg.DeployMode
+            $selectedRelayPath = [string]$redeployCfg.PublicRelayPath
+            Write-Host "Done."
           }
-          Ensure-LinkedToProject -ProjectName $selectedProjectName -Scope $scope
-          $deployInfo = Deploy-Production -Scope $scope -Runtime "node"
-          $selectedRuntime = "node"
-          $selectedDeployMode = "NODE_REDEPLOY"
-          Save-LocalProjectDeployState -ProjectName $selectedProjectName -Scope $scope -DeployMode $selectedDeployMode -Runtime $selectedRuntime -RelayPath $selectedRelayPath
-          Show-DeploySummary $deployInfo
-          Write-Host "Done."
         }
         "3" {
           $updatedCfg = Run-UpdateEnvFlow -Scope $scope
@@ -4914,19 +5198,13 @@ function Run-ManagementLoop([string]$InitialScope) {
           }
         }
         "6" {
-          if ([string]::IsNullOrWhiteSpace($selectedProjectName)) {
-            Write-Host "Select a project first (option 1)." -ForegroundColor Red
-            break
+          $healthCfg = Run-InteractiveHealthCheck -SelectedProjectName $selectedProjectName -Scope $scope -DefaultRelayPath $selectedRelayPath -DefaultRuntime $selectedRuntime
+          if ($null -ne $healthCfg) {
+            $selectedProjectName = [string]$healthCfg.ProjectName
+            $scope = Normalize-ScopeForCli -Scope ([string]$healthCfg.Scope)
+            $selectedRuntime = [string]$healthCfg.Runtime
+            $selectedRelayPath = [string]$healthCfg.RelayPath
           }
-          $rp = Read-Default "Relay path for checks (0 = Back)" $selectedRelayPath
-          if ($rp -eq "0") { break }
-          $relayKeyForCheck = ""
-          if ($selectedRuntime -eq "rewrite") {
-            Write-Host "If this Fast Pipe deploy uses RELAY_KEY, enter it for an accurate relay-path check." -ForegroundColor DarkYellow
-            $relayKeyForCheck = Read-Optional "x-relay-key for this check only (empty = no header, 0 = Back)"
-            if ($relayKeyForCheck -eq "0") { break }
-          }
-          Run-HealthAndSmokeChecks -ProjectName $selectedProjectName -RelayPath $rp -Runtime $selectedRuntime -RelayKey $relayKeyForCheck
         }
         "7" {
           if ([string]::IsNullOrWhiteSpace($selectedProjectName)) {
