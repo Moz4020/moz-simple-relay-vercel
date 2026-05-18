@@ -9,6 +9,7 @@ try { $PSDefaultParameterValues['Invoke-WebRequest:UseBasicParsing'] = $true } c
 $NpmExe = "npm.cmd"
 $VercelExe = "vercel.cmd"
 $script:LastVercelAuthStatus = "unknown"
+$script:AppVersion = "v1.0.0"
 
 try {
   [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -18,7 +19,7 @@ try {
 function Write-Banner {
   Clear-Host
   Write-Host "==============================================" -ForegroundColor Cyan
-  Write-Host " Moz Simple Vercel Relay Windows Installer" -ForegroundColor Cyan
+  Write-Host (" Moz Simple Vercel Relay {0}" -f $script:AppVersion) -ForegroundColor Cyan
   Write-Host " Guided deployment helper" -ForegroundColor Cyan
   Write-Host "==============================================" -ForegroundColor Cyan
   Write-Host ""
@@ -105,25 +106,19 @@ function Choose-DeploymentMode {
   Write-Host "Choose deployment mode:" -ForegroundColor Cyan
   Write-Host "[0] Back"
   Write-Host ""
-  Write-Host "[1] FAST PIPE LEGACY  (Recommended / Best compatibility / No Fluid cost)" -ForegroundColor Green
+  Write-Host "[1] FAST REWRITE LEGACY  (Recommended / Best compatibility / No Fluid cost)" -ForegroundColor Green
   Write-Host "    Rewrite using /path/(.*) -> upstream/path/`$1. Best first test for video/sites/apps."
   Write-Host ""
-  Write-Host "[2] FAST PIPE MODERN  (Official Vercel syntax / No Fluid cost)" -ForegroundColor Green
+  Write-Host "[2] FAST REWRITE MODERN  (Official Vercel syntax / No Fluid cost)" -ForegroundColor Green
   Write-Host "    Rewrite using /path/:path* -> upstream/path/:path*. Cleaner routing."
   Write-Host ""
-  Write-Host "[3] FAST PIPE SIMPLE  (Legacy single rule / No headers / No Fluid cost)" -ForegroundColor Green
-  Write-Host "    Single rewrite only: /path/(.*) -> upstream/path/`$1. No headers, no key, no base path, no fallback."
+  Write-Host "[3] BALANCED   (Node + Fluid ON)" -ForegroundColor Cyan
+  Write-Host "    Standard Node profile. 256 conn | 5 MB/s up/down | 60s upstream | 800s function."
   Write-Host ""
-  Write-Host "[4] FAST PIPE SIMPLE MODERN  (Modern single rule / No headers / No Fluid cost)" -ForegroundColor Green
-  Write-Host "    Single rewrite only: /path/:path* -> upstream/path/:path*. No headers, no key, no base path, no fallback."
+  Write-Host "[4] MAX CONN   (Node + Fluid ON)" -ForegroundColor Cyan
+  Write-Host "    Higher capacity profile. 512 conn | 10 MB/s up/down | 60s upstream | 800s function."
   Write-Host ""
-  Write-Host "[5] HOBBY BALANCED   (Node + Fluid ON / Hobby-safe)" -ForegroundColor Cyan
-  Write-Host "    Hobby tier profile. 128 conn | 3 MB/s up/down | 45s upstream | 60s function."
-  Write-Host ""
-  Write-Host "[6] PRO BALANCED   (Node + Fluid ON)" -ForegroundColor Cyan
-  Write-Host "    Pro/Enterprise profile. 256 conn | 5 MB/s up/down | 60s upstream | 800s function."
-  Write-Host ""
-  Write-Host "[7] CUSTOM     (Manual)" -ForegroundColor Yellow
+  Write-Host "[5] CUSTOM     (Manual)" -ForegroundColor Yellow
   Write-Host "    Set runtime, Fluid, regions, CPU, duration, limits, timeout and logs yourself."
   Write-Host ""
 
@@ -153,7 +148,7 @@ function Choose-DeploymentMode {
         RequireRelayKey = $false
       }
     }
-    "7" {
+    "5" {
       $runtimePick = Read-Default "Runtime type (node/rewrite, 0 = Back)" "node"
       if ($runtimePick.Trim() -eq "0") {
         return @{ Canceled = $true; ModeKey = "__BACK__" }
@@ -166,14 +161,12 @@ function Choose-DeploymentMode {
         Write-Host "Custom rewrite routing:" -ForegroundColor Cyan
         Write-Host "[1] Legacy         | /path/(.*) -> upstream/path/`$1"
         Write-Host "[2] Modern         | /path/:path* -> upstream/path/:path*"
-        Write-Host "[3] Simple         | single /path/(.*) -> upstream/path/`$1"
-        Write-Host "[4] Simple Modern  | single /path/:path* -> upstream/path/:path*"
         Write-Host "[0] Back"
         $routePick = Read-Default "Select rewrite routing" "1"
         if ($routePick -eq "0") {
           return @{ Canceled = $true; ModeKey = "__BACK__" }
         }
-        $rewriteStyle = if ($routePick -eq "2") { "modern" } elseif ($routePick -eq "3") { "simplelegacy" } elseif ($routePick -eq "4") { "simplemodern" } else { "legacy" }
+        $rewriteStyle = if ($routePick -eq "2") { "modern" } else { "legacy" }
         $rewriteSecurity = "optional"
       }
       $fluidEnabled = $false
@@ -238,61 +231,7 @@ function Choose-DeploymentMode {
     "3" {
       return @{
         Canceled = $false
-        ModeKey = "FAST_PIPE_SIMPLE"
-        Runtime = "rewrite"
-        RewriteStyle = "simplelegacy"
-        RewriteSecurity = "optional"
-        FluidEnabled = $false
-        MaxInflight = ""
-        MaxUpBps = ""
-        MaxDownBps = ""
-        UpstreamTimeoutMs = "30000"
-        FunctionTimeoutSec = 0
-        FunctionCpu = ""
-        RunStressAfterDeploy = $false
-        RequireRelayKey = $false
-      }
-    }
-    "4" {
-      return @{
-        Canceled = $false
-        ModeKey = "FAST_PIPE_SIMPLE_MODERN"
-        Runtime = "rewrite"
-        RewriteStyle = "simplemodern"
-        RewriteSecurity = "optional"
-        FluidEnabled = $false
-        MaxInflight = ""
-        MaxUpBps = ""
-        MaxDownBps = ""
-        UpstreamTimeoutMs = "30000"
-        FunctionTimeoutSec = 0
-        FunctionCpu = ""
-        RunStressAfterDeploy = $false
-        RequireRelayKey = $false
-      }
-    }
-    "5" {
-      return @{
-        Canceled = $false
-        ModeKey = "HOBBY_BALANCED"
-        Runtime = "node"
-        RewriteStyle = ""
-        RewriteSecurity = ""
-        FluidEnabled = $true
-        MaxInflight = "128"
-        MaxUpBps = "3145728"
-        MaxDownBps = "3145728"
-        UpstreamTimeoutMs = "45000"
-        FunctionTimeoutSec = 60
-        FunctionCpu = "standard"
-        RunStressAfterDeploy = $false
-        RequireRelayKey = $false
-      }
-    }
-    "6" {
-      return @{
-        Canceled = $false
-        ModeKey = "PRO_BALANCED"
+        ModeKey = "BALANCED_LOW_TIMEOUT"
         Runtime = "node"
         RewriteStyle = ""
         RewriteSecurity = ""
@@ -300,6 +239,24 @@ function Choose-DeploymentMode {
         MaxInflight = "256"
         MaxUpBps = "5242880"
         MaxDownBps = "5242880"
+        UpstreamTimeoutMs = "60000"
+        FunctionTimeoutSec = 800
+        FunctionCpu = "standard"
+        RunStressAfterDeploy = $false
+        RequireRelayKey = $false
+      }
+    }
+    "4" {
+      return @{
+        Canceled = $false
+        ModeKey = "MAX_STABILITY_HIGH_CONN"
+        Runtime = "node"
+        RewriteStyle = ""
+        RewriteSecurity = ""
+        FluidEnabled = $true
+        MaxInflight = "512"
+        MaxUpBps = "10485760"
+        MaxDownBps = "10485760"
         UpstreamTimeoutMs = "60000"
         FunctionTimeoutSec = 800
         FunctionCpu = "standard"
@@ -1608,7 +1565,7 @@ function Show-RewriteClientGuidance($cfg, $deployInfo) {
   Write-Host " - Test Mux ON with low concurrency first (4 or 8). If video stalls, test Mux OFF too." -ForegroundColor Cyan
   Write-Host " - If your client has heartbeat/keepalive, try 15-20 seconds. Very low values increase Edge Requests." -ForegroundColor Cyan
   Write-Host " - On the upstream server, keep BBR enabled and test MTU 1350/1280 only if mobile routes stall." -ForegroundColor Cyan
-  Write-Host " - For full control/log/throttle, use HOBBY BALANCED or PRO BALANCED Node mode instead of rewrite." -ForegroundColor DarkYellow
+  Write-Host " - For full control/log/throttle, use BALANCED or MAX CONN Node mode instead of rewrite." -ForegroundColor DarkYellow
 }
 
 function Get-LinkedTeamId([string]$ProjectRoot) {
@@ -1680,22 +1637,12 @@ function Collect-NewDeploymentConfig([string]$DefaultScope) {
   }
   $relayKey = ""
   if ($mode.Runtime -eq "rewrite") {
-    if ($mode.RewriteStyle -eq "simplelegacy" -or $mode.RewriteStyle -eq "simplemodern") {
-      Write-Host "FAST PIPE SIMPLE: no headers will be configured." -ForegroundColor Green
-      if ($mode.RewriteStyle -eq "simplemodern") {
-        Write-Host "No x-relay-key prompt, no cache headers, no base path, no fallback rule. It is exactly one modern rewrite rule." -ForegroundColor DarkYellow
-      } else {
-        Write-Host "No x-relay-key prompt, no cache headers, no base path, no fallback rule. It is exactly one legacy rewrite rule." -ForegroundColor DarkYellow
-      }
-      $relayKey = ""
-    } else {
-      Write-Host "RELAY_KEY is optional in Fast Pipe." -ForegroundColor DarkYellow
-      Write-Host "Leave it empty for no x-relay-key. If you set it, the client MUST send header x-relay-key with the exact same value." -ForegroundColor DarkYellow
-      $relayKey = Read-Optional "RELAY_KEY (optional; empty = no x-relay-key required, 0 = Back)"
-      if ($relayKey -eq "0") {
-        Write-Host "Canceled. Returning to main menu." -ForegroundColor DarkYellow
-        return $null
-      }
+    Write-Host "RELAY_KEY is optional in Fast Pipe." -ForegroundColor DarkYellow
+    Write-Host "Leave it empty for no x-relay-key. If you set it, the client MUST send header x-relay-key with the exact same value." -ForegroundColor DarkYellow
+    $relayKey = Read-Optional "RELAY_KEY (optional; empty = no x-relay-key required, 0 = Back)"
+    if ($relayKey -eq "0") {
+      Write-Host "Canceled. Returning to main menu." -ForegroundColor DarkYellow
+      return $null
     }
   }
 
@@ -1953,17 +1900,12 @@ function Collect-RedeployConfig([string]$ProjectName, [string]$Scope) {
 
   $relayKey = ""
   if ($mode.Runtime -eq "rewrite") {
-    if ($mode.RewriteStyle -eq "simplelegacy" -or $mode.RewriteStyle -eq "simplemodern") {
-      Write-Host "FAST PIPE SIMPLE: no headers will be configured." -ForegroundColor Green
-      $relayKey = ""
-    } else {
-      Write-Host "RELAY_KEY is optional in Fast Pipe." -ForegroundColor DarkYellow
-      Write-Host "Leave it empty for no x-relay-key. If you set it, the client MUST send header x-relay-key with the exact same value." -ForegroundColor DarkYellow
-      $relayKey = Read-Optional "RELAY_KEY (optional; empty = no x-relay-key required, 0 = Back)"
-      if ($relayKey -eq "0") {
-        Write-Host "Canceled. Returning to main menu." -ForegroundColor DarkYellow
-        return $null
-      }
+    Write-Host "RELAY_KEY is optional in Fast Pipe." -ForegroundColor DarkYellow
+    Write-Host "Leave it empty for no x-relay-key. If you set it, the client MUST send header x-relay-key with the exact same value." -ForegroundColor DarkYellow
+    $relayKey = Read-Optional "RELAY_KEY (optional; empty = no x-relay-key required, 0 = Back)"
+    if ($relayKey -eq "0") {
+      Write-Host "Canceled. Returning to main menu." -ForegroundColor DarkYellow
+      return $null
     }
   }
 
@@ -3244,6 +3186,58 @@ function Get-VercelUsageCliRows([string]$Scope, [string]$TokenStorePath, [DateTi
   }
 }
 
+function Get-VercelCurrentUsageCliSummary([string]$Scope, [string]$TokenStorePath) {
+  $Scope = Normalize-ScopeForCli -Scope $Scope
+  $args = @("usage", "--format", "json", "--no-color", "--non-interactive")
+  if (-not [string]::IsNullOrWhiteSpace($Scope)) { $args += @("--scope", $Scope) }
+  $args += (Get-VercelTokenArgs)
+
+  $result = Invoke-NativeSafe -FilePath $VercelExe -Arguments $args -TimeoutSec 120
+  if ($result.ExitCode -ne 0) {
+    $rawErr = (($result.Output | Select-Object -First 6) -join " ")
+    throw ("Vercel CLI usage failed. {0}" -f $rawErr)
+  }
+
+  $raw = (($result.Output | Out-String).Trim())
+  $objectStart = $raw.IndexOf("{")
+  $objectEnd = $raw.LastIndexOf("}")
+  if ($objectStart -lt 0 -or $objectEnd -lt $objectStart) {
+    throw "Vercel CLI usage did not return JSON. Update Vercel CLI and try again."
+  }
+
+  $obj = $raw.Substring($objectStart, ($objectEnd - $objectStart + 1)) | ConvertFrom-Json -ErrorAction Stop
+  $totals = Get-ObjectPropertyValue -Obj $obj -Names @("totals", "Totals", "grandTotal", "GrandTotal", "total", "Total")
+  $period = Get-ObjectPropertyValue -Obj $obj -Names @("period", "Period")
+
+  $billed = Get-FirstBillingNumber -Obj $totals -Names @("billedCost", "BilledCost", "Billed Cost", "charge", "Charge", "cost", "Cost")
+  $effective = Get-FirstBillingNumber -Obj $totals -Names @("effectiveCost", "EffectiveCost", "Effective Cost", "usage", "Usage", "value", "Value", "total", "Total")
+  $used = if ($effective -gt 0) { $effective } else { $billed }
+
+  if ($used -le 0) {
+    $rows = @(Convert-VercelUsageCliToBillingRows -UsageObj $obj)
+    foreach ($row in $rows) {
+      $rowEffective = Convert-ToDoubleSafe -Value $row.EffectiveCost
+      $rowBilled = Convert-ToDoubleSafe -Value $row.BilledCost
+      if ($rowEffective -gt 0) { $used += $rowEffective } else { $used += $rowBilled }
+    }
+  }
+
+  $fromText = ""
+  $toText = ""
+  if ($null -ne $period) {
+    $fromText = [string](Get-ObjectPropertyValue -Obj $period -Names @("start", "from", "From", "Start", "startDate", "StartDate"))
+    $toText = [string](Get-ObjectPropertyValue -Obj $period -Names @("end", "to", "To", "End", "endDate", "EndDate"))
+  }
+
+  return @{
+    Used = $used
+    Scope = $Scope
+    From = $fromText
+    To = $toText
+    Source = "vercel usage current billing period"
+  }
+}
+
 function Get-VercelBillingCharges([string]$Scope, [string]$TokenStorePath, [DateTime]$From, [DateTime]$To) {
   $token = Get-VercelApiToken -TokenStorePath $TokenStorePath
   if ([string]::IsNullOrWhiteSpace($token)) {
@@ -3287,152 +3281,39 @@ function Get-BillingProjectTagText($Row, [string]$TagName) {
 }
 
 function Show-BillingUsageMonitor([string]$ProjectName, [string]$Scope, [string]$TokenStorePath) {
-  Write-Step "Billing / Usage monitor"
-  Write-Host "Data source: Vercel REST API, with Vercel CLI usage fallback." -ForegroundColor Cyan
-  Write-Host "Plan limits shown as 23GB/100GB style are estimated Pro allowances when Vercel does not return limits in charge rows." -ForegroundColor DarkGray
-  Write-Host ""
-  Write-Host "[0] Back to main menu"
-  Write-Host "[1] Current month to date (default)"
-  Write-Host "[2] Last 7 days"
-  Write-Host "[3] Last 30 days"
-  Write-Host "[4] Custom date range"
-  $pick = Read-Default "Select billing window" "1"
-  if ($pick -eq "0") { return }
-
-  $now = Get-Date
-  $from = Get-Date -Year $now.Year -Month $now.Month -Day 1 -Hour 0 -Minute 0 -Second 0
-  $to = $now
-  switch ($pick) {
-    "2" { $from = $now.AddDays(-7) }
-    "3" { $from = $now.AddDays(-30) }
-    "4" {
-      $fromRaw = Read-Default "From date (YYYY-MM-DD, 0 = Back)" $from.ToString("yyyy-MM-dd")
-      if ($fromRaw -eq "0") { return }
-      $toRaw = Read-Default "To date (YYYY-MM-DD)" $now.ToString("yyyy-MM-dd")
-      try {
-        $from = [DateTime]::ParseExact($fromRaw, "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
-        $to = ([DateTime]::ParseExact($toRaw, "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)).AddDays(1).AddSeconds(-1)
-      } catch {
-        throw "Invalid date format. Use YYYY-MM-DD."
-      }
+  Write-Step "Pro trial credit"
+  $trialCredit = 20.0
+  $summary = Get-VercelCurrentUsageCliSummary -Scope $Scope -TokenStorePath $TokenStorePath
+  $used = [double]$summary.Used
+  Write-Host ("Vercel API says used: ${0:N2}" -f $used) -ForegroundColor DarkGray
+  Write-Host "If your Vercel dashboard shows a different used amount, type that number here." -ForegroundColor DarkYellow
+  Write-Host "Example: if dashboard says `$17.13 used, enter 17.13. Otherwise press Enter." -ForegroundColor DarkGray
+  $overrideRaw = Read-Optional "Dashboard used amount (optional)"
+  if (-not [string]::IsNullOrWhiteSpace($overrideRaw)) {
+    $overrideClean = $overrideRaw.Trim().TrimStart('$')
+    $overrideValue = Convert-ToDoubleSafe -Value $overrideClean -Default -1
+    if ($overrideValue -ge 0) {
+      $used = $overrideValue
+    } else {
+      Write-Host "Invalid override ignored; using API value." -ForegroundColor DarkYellow
     }
   }
-
-  $filterProject = $false
-  if (-not [string]::IsNullOrWhiteSpace($ProjectName)) {
-    $ans = Read-Default ("Filter to selected project '{0}' only? (y/N)" -f $ProjectName) "n"
-    $filterProject = ($ans.ToLowerInvariant() -eq "y")
-  }
-
-  $loaded = Get-VercelBillingCharges -Scope $Scope -TokenStorePath $TokenStorePath -From $from -To $to
-  $rows = @($loaded.Rows)
-  if ($filterProject) {
-    $rows = @($rows | Where-Object {
-      (Get-BillingProjectTagText -Row $_ -TagName "ProjectName") -eq $ProjectName
-    })
-  }
+  $remaining = [Math]::Max(0, $trialCredit - $used)
+  $percentLeft = if ($trialCredit -gt 0) { ($remaining / $trialCredit) * 100 } else { 0 }
+  $color = if ($percentLeft -le 10) { "Red" } elseif ($percentLeft -le 30) { "Yellow" } else { "Green" }
 
   Write-Host ""
-  Write-Host ("Window: {0} -> {1}" -f $from.ToString("yyyy-MM-dd HH:mm"), $to.ToString("yyyy-MM-dd HH:mm")) -ForegroundColor Cyan
-  if (-not [string]::IsNullOrWhiteSpace([string]$loaded.Scope)) {
-    Write-Host ("Scope used: {0}" -f [string]$loaded.Scope) -ForegroundColor DarkGray
+  if (-not [string]::IsNullOrWhiteSpace([string]$summary.Scope)) {
+    Write-Host ("Scope used: {0}" -f [string]$summary.Scope) -ForegroundColor DarkGray
   }
-  if ($loaded.ContainsKey("Source") -and -not [string]::IsNullOrWhiteSpace([string]$loaded.Source)) {
-    Write-Host ("Data source used: {0}" -f [string]$loaded.Source) -ForegroundColor DarkGray
+  if (-not [string]::IsNullOrWhiteSpace([string]$summary.From) -or -not [string]::IsNullOrWhiteSpace([string]$summary.To)) {
+    Write-Host ("Billing period: {0} -> {1}" -f [string]$summary.From, [string]$summary.To) -ForegroundColor DarkGray
   }
-  if ($filterProject) {
-    Write-Host ("Project filter: {0}" -f $ProjectName) -ForegroundColor DarkGray
-  }
-
-  if ($rows.Count -eq 0) {
-    Write-Host "No billing usage rows returned for this window/filter." -ForegroundColor DarkYellow
-    return
-  }
-
-  $groups = @{}
-  foreach ($r in $rows) {
-    $service = [string](Get-ObjectPropertyValue -Obj $r -Names @("ServiceName", "serviceName", "Product", "product"))
-    $service = Normalize-BillingServiceName -ServiceName $service
-    $unit = [string](Get-ObjectPropertyValue -Obj $r -Names @("ConsumedUnit", "consumedUnit", "Consumed Unit", "PricingUnit", "pricingUnit", "Unit", "unit"))
-    $qty = Get-FirstBillingNumber -Obj $r -Names @("ConsumedQuantity", "consumedQuantity", "Consumed Quantity", "UsageQuantity", "usageQuantity", "PricingQuantity", "pricingQuantity", "Usage", "usage", "quantity", "Quantity")
-    $billed = Get-FirstBillingNumber -Obj $r -Names @("BilledCost", "billedCost", "Billed Cost", "Charge", "charge", "Cost", "cost", "CostInBillingCurrency", "costInBillingCurrency")
-    $effective = Get-FirstBillingNumber -Obj $r -Names @("EffectiveCost", "effectiveCost", "Effective Cost", "ListCost", "listCost", "ContractedCost", "contractedCost", "PricingQuantity", "pricingQuantity")
-    $category = [string](Get-ObjectPropertyValue -Obj $r -Names @("ServiceCategory", "serviceCategory", "ChargeCategory", "chargeCategory"))
-    if ([string]::IsNullOrWhiteSpace($service)) { $service = "Unknown" }
-    if (-not $groups.ContainsKey($service)) {
-      $groups[$service] = [pscustomobject]@{
-        Service = $service
-        Category = $category
-        Unit = $unit
-        Quantity = 0.0
-        BilledCost = 0.0
-        EffectiveCost = 0.0
-      }
-    }
-    $groups[$service].Quantity += $qty
-    $groups[$service].BilledCost += $billed
-    $groups[$service].EffectiveCost += $effective
-    if ([string]::IsNullOrWhiteSpace([string]$groups[$service].Unit) -and -not [string]::IsNullOrWhiteSpace($unit)) {
-      $groups[$service].Unit = $unit
-    }
-    if ([string]::IsNullOrWhiteSpace([string]$groups[$service].Category) -and -not [string]::IsNullOrWhiteSpace($category)) {
-      $groups[$service].Category = $category
-    }
-  }
-
-  $summaryRows = @()
-  foreach ($g in $groups.Values) {
-    $summaryRows += [pscustomobject]@{
-      Product = [string]$g.Service
-      Usage = (Get-BillingUsageRatioText -ServiceName ([string]$g.Service) -Quantity ([double]$g.Quantity) -Unit ([string]$g.Unit))
-      Charge = ("${0:N2}" -f ([double]$g.BilledCost))
-      Value = ("${0:N2}" -f ([double]$g.EffectiveCost))
-      RawQuantity = [double]$g.Quantity
-      RawUnit = [string]$g.Unit
-      RawCost = [double]$g.BilledCost
-    }
-  }
-
-  $totalCharge = 0.0
-  $totalValue = 0.0
-  foreach ($g in $groups.Values) {
-    $totalCharge += [double]$g.BilledCost
-    $totalValue += [double]$g.EffectiveCost
-  }
-
+  Write-Host ("Data source used: {0}" -f [string]$summary.Source) -ForegroundColor DarkGray
   Write-Host ""
-  Write-Host "Usage summary:" -ForegroundColor Cyan
-  foreach ($row in ($summaryRows | Sort-Object @{ Expression = "RawCost"; Descending = $true }, Product)) {
-    $color = Get-BillingRowColor -ServiceName $row.Product -Quantity $row.RawQuantity -Unit $row.RawUnit -Cost $row.RawCost
-    Write-Host (" - {0}: {1} | Charge {2}" -f $row.Product, $row.Usage, $row.Charge) -ForegroundColor $color
-  }
-
-  Write-Host ""
-  Write-Host ("Total charge in this window: ${0:N2}" -f $totalCharge) -ForegroundColor Yellow
-  Write-Host ("Effective usage value before included/committed allowances: ${0:N2}" -f $totalValue) -ForegroundColor DarkGray
-  Write-Host "Note: Charge is the API billed cost for the selected window. Value is useful for seeing real resource value even when included credit covers it." -ForegroundColor DarkGray
-
-  $save = Read-Default "Save billing usage report to txt file? (y/N)" "n"
-  if ($save.ToLowerInvariant() -eq "y") {
-    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $out = Join-Path $scriptDir ("billing-usage-{0}.txt" -f $stamp)
-    $lines = @()
-    $lines += "Moz Simple Vercel Relay Billing Usage Report"
-    $lines += ("generated_at={0}" -f (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"))
-    $lines += ("window_from={0}" -f $from.ToString("yyyy-MM-dd HH:mm:ss"))
-    $lines += ("window_to={0}" -f $to.ToString("yyyy-MM-dd HH:mm:ss"))
-    $lines += ("scope={0}" -f [string]$loaded.Scope)
-    if ($filterProject) { $lines += ("project_filter={0}" -f $ProjectName) }
-    $lines += ("total_charge_usd={0:N4}" -f $totalCharge)
-    $lines += ("effective_value_usd={0:N4}" -f $totalValue)
-    $lines += ""
-    foreach ($row in ($summaryRows | Sort-Object Product)) {
-      $lines += ("{0} | usage={1} | charge={2} | value={3}" -f $row.Product, $row.Usage, $row.Charge, $row.Value)
-    }
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllLines($out, $lines, $utf8NoBom)
-    Write-Host ("Billing report saved: {0}" -f $out) -ForegroundColor Green
-  }
+  Write-Host 'Pro trial credit: $20.00' -ForegroundColor Cyan
+  Write-Host ('Used:             ${0:N2}' -f $used) -ForegroundColor Yellow
+  Write-Host ('Left:             ${0:N2} ({1:N1}%)' -f $remaining, $percentLeft) -ForegroundColor $color
 }
 
 function Get-ApiErrorText($errObj) {
@@ -4769,16 +4650,7 @@ function Get-EnvMapFromApi([string]$ProjectName, [string]$Scope, [string]$TokenS
 function Run-EnvDriftDetector([string]$ProjectName, [string]$Scope, [string]$TokenStorePath) {
   Write-Step "ENV drift detector"
   $profiles = @{
-    hobby_balanced = @{
-      "UPSTREAM_TIMEOUT_MS" = "45000"
-      "MAX_INFLIGHT" = "128"
-      "MAX_UP_BPS" = "3145728"
-      "MAX_DOWN_BPS" = "3145728"
-      "SUCCESS_LOG_SAMPLE_RATE" = "0"
-      "SUCCESS_LOG_MIN_DURATION_MS" = "3000"
-      "ERROR_LOG_MIN_INTERVAL_MS" = "5000"
-    }
-    pro_balanced = @{
+    balanced = @{
       "UPSTREAM_TIMEOUT_MS" = "60000"
       "MAX_INFLIGHT" = "256"
       "MAX_UP_BPS" = "5242880"
@@ -4787,17 +4659,26 @@ function Run-EnvDriftDetector([string]$ProjectName, [string]$Scope, [string]$Tok
       "SUCCESS_LOG_MIN_DURATION_MS" = "3000"
       "ERROR_LOG_MIN_INTERVAL_MS" = "5000"
     }
+    max_conn = @{
+      "UPSTREAM_TIMEOUT_MS" = "60000"
+      "MAX_INFLIGHT" = "512"
+      "MAX_UP_BPS" = "10485760"
+      "MAX_DOWN_BPS" = "10485760"
+      "SUCCESS_LOG_SAMPLE_RATE" = "0"
+      "SUCCESS_LOG_MIN_DURATION_MS" = "3000"
+      "ERROR_LOG_MIN_INTERVAL_MS" = "5000"
+    }
   }
 
-  Write-Host "Profiles: hobby_balanced | pro_balanced | 0 = Back" -ForegroundColor Cyan
+  Write-Host "Profiles: balanced | max_conn | 0 = Back" -ForegroundColor Cyan
   Write-Host "Profile here means: expected target values for this project's behavior." -ForegroundColor DarkGray
-  $p = Read-Default "Select baseline profile" "hobby_balanced"
+  $p = Read-Default "Select baseline profile" "balanced"
   if ($p -eq "0") {
     Write-Host "Canceled. Returning to main menu." -ForegroundColor DarkYellow
     return
   }
-  if ($p -eq "balanced") { $p = "pro_balanced" }
-  if (-not $profiles.ContainsKey($p)) { $p = "hobby_balanced" }
+  if ($p -eq "max_connection") { $p = "max_conn" }
+  if (-not $profiles.ContainsKey($p)) { $p = "balanced" }
   $baseline = $profiles[$p]
 
   $current = Get-EnvMapFromApi -ProjectName $ProjectName -Scope $Scope -TokenStorePath $TokenStorePath
@@ -4979,7 +4860,7 @@ function Show-HealthTestMenu($selectedProjectName, $scope) {
   Write-Host "Health Test" -ForegroundColor Cyan
   Write-Host "[1] Health test"
   Write-Host "[2] ENV"
-  Write-Host "[3] Billing"
+  Write-Host "[3] Pro trial credit"
   Write-Host "[0] Back"
   $choice = Read-Default "Choose action" "1"
   switch ($choice) {
@@ -5055,7 +4936,7 @@ function Show-LegacyManageMenu($selectedProjectName, $scope) {
   Write-Host "[11] Live readable logs (press Q to stop)"
   Write-Host "[12] View deployment ENV config (full)"
   Write-Host "[13] Delete Project (choose from list)"
-  Write-Host "[14] Billing / Usage monitor (REST API)"
+  Write-Host "[14] Pro trial credit"
   Write-Host "[15] Exit"
   return (Read-Default "Choose action" "1")
 }

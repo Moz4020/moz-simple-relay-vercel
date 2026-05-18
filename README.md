@@ -9,8 +9,6 @@ This project can run in two modes:
 
 The repository also includes a Windows deployment helper that guides setup, project linking, environment configuration, and deployment.
 
-For Vercel Hobby projects, use the `HOBBY BALANCED` mode in the Windows helper. It keeps the original 60 second function duration while using Hobby-friendly traffic limits and preserving the streaming/header behavior that works better than rewrite-only modes for media-heavy sites.
-
 ## Features
 
 - Vercel-ready relay endpoint
@@ -169,11 +167,11 @@ Use this mode when you want:
 - relay-key validation inside the function
 - basic error and performance diagnostics
 
-The Windows helper includes two balanced Node profiles:
+The Windows helper includes two Node profiles:
 
 ```text
-HOBBY BALANCED: 128 concurrent requests, 3 MB/s upload/download caps, 45s upstream timeout, 60s function duration
-PRO BALANCED:   256 concurrent requests, 5 MB/s upload/download caps, 60s upstream timeout, 800s function duration
+BALANCED: 256 concurrent requests, 5 MB/s upload/download caps, 60s upstream timeout, 800s function duration
+MAX CONN: 512 concurrent requests, 10 MB/s upload/download caps, 60s upstream timeout, 800s function duration
 ```
 
 ## Troubleshooting
